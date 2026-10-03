@@ -1,6 +1,9 @@
-# openclash-router
+# OpenClash-Router
 
 一个 [Agent Skill](https://agentskills.io/specification)：通过 SSH 操作 OpenWrt / iStoreOS 路由器上的 **OpenClash**。
+
+> 仓库名用 `OpenClash-Router` 看着清楚；技能标识（目录名 + `SKILL.md` 的 `name`）保持小写 `openclash-router` ——
+> [Agent Skills 规范](https://agentskills.io/specification) 要求 name 只能用小写字母、数字、连字符。
 
 兼容任何支持 Agent Skills 标准的 agent —— Claude Code / Claude.ai、pi、Cursor 等。
 （标准只要求一个目录 + `SKILL.md`，本仓库即符合。）
@@ -41,7 +44,7 @@ OpenClash 自身的功能知识（选项含义、防火墙链、覆写语法）*
 放进你所用 agent 的技能目录即可（目录名保持 `openclash-router`）：
 
 ```bash
-git clone https://github.com/RiverFlowsInUUU/openclash-router.git <你的技能目录>/openclash-router
+git clone https://github.com/RiverFlowsInUUU/OpenClash-Router.git <你的技能目录>/openclash-router
 ```
 
 常见位置（按你的 agent 选一个）：
