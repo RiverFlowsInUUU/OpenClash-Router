@@ -49,7 +49,7 @@ python <技能目录>/scripts/oc.py where      # 打印技能/脚本/配置的�
 ```
 
 > 💡 **把脚本当黑盒用，不要读它的源码。**
-> 它有 600+ 行，读进来会挤占你的上下文，而它本来就是设计成直接调用的。
+> 它有约 800 行，读进来会挤占你的上下文，而它本来就是设计成直接调用的。
 > 想看用法就 `--help`：
 > ```bash
 > python "$SKILL/scripts/oc.py" --help
@@ -140,7 +140,6 @@ OC="python $SKILL/scripts/oc.py"
 $OC probe                                        # 状态总览
 $OC pull <源文件> ./work/proxy.yaml               # 拿到配置
 ```
-
 然后告诉用户：**改什么、改成什么、怎么回滚**。等用户确认。别自己闷头改。
 
 **2. 本地编辑，不用 sed**
@@ -155,6 +154,9 @@ $OC push ./work/proxy_new.yaml /tmp/proxy_new.yaml
 $OC run "/etc/openclash/clash -t -d /etc/openclash -f /tmp/proxy_new.yaml"
 ```
 
+（`/etc/openclash/clash` 是插件维护的软链，一般就指向当前核心；
+若不存在，用 `ls /etc/openclash/core/` 找实际二进制，或直接 `$OC probe` 看内核版本那行。）
+
 看到 `configuration file ... test is successful` 才能往下走。
 这一步能在**不影响线上**的前提下抓住语法错误 —— 直接覆盖再重启的话，
 核心起不来，用户就断网了。
@@ -165,9 +167,10 @@ $OC run "/etc/openclash/clash -t -d /etc/openclash -f /tmp/proxy_new.yaml"
 $OC run "cp -a <源文件> <源文件>.bak-\$(date +%Y%m%d-%H%M%S)"
 $OC push ./work/proxy_new.yaml <源文件>
 $OC run "/etc/init.d/openclash restart"
-# 验证：新节点/新规则真的进去了吗
-$OC run 'SEC=$(uci get openclash.@openclash[0].dashboard_password); \
-         curl -s -H "Authorization: Bearer $SEC" http://127.0.0.1:9090/proxies | head -c 500'
+# 验证：新节点/新规则真的进去了吗（端口从配置读，别写死）
+$OC run 'SEC=$(uci get openclash.@openclash[0].dashboard_password)
+         PORT=$(uci get openclash.@openclash[0].cn_port)
+         curl -s -H "Authorization: Bearer $SEC" http://127.0.0.1:$PORT/proxies | head -c 500'
 ```
 
 **把备份路径告诉用户**，并给出回滚命令。这样他随时能自己退回去。

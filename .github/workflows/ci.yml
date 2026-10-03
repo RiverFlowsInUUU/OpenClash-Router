@@ -138,6 +138,22 @@ jobs:
           print("OK  无过期内容/超大文件")
           PY
 
+      - name: SKILL.md 中声称的文件行数与实际一致
+        run: |
+          python - <<'PY'
+          import re, sys, pathlib
+          t = pathlib.Path("SKILL.md").read_text(encoding="utf-8")
+          actual = sum(1 for _ in open("scripts/oc.py", encoding="utf-8"))
+          m = re.search(r"它有约? ?(\d+)\+? ?行", t)
+          if m:
+              claimed = int(m.group(1))
+              if abs(claimed - actual) > 50:
+                  sys.exit(f"SKILL.md 声称 oc.py 有 {claimed} 行，实际 {actual} 行，偏差过大")
+              print(f"OK  行数声称一致（声称 {claimed}，实际 {actual}）")
+          else:
+              print("SKIP  SKILL.md 未声称行数")
+          PY
+
       - name: 敏感文件泄露检查
         run: |
           python - <<'PY'

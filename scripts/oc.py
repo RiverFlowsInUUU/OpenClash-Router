@@ -235,13 +235,23 @@ def run_remote(cli, command, timeout=None):
 
 
 # ---------------------------------------------------------------- doctor
+# (名称, 检查命令, 提示文字)  —— 检查命令退出码 0 且输出非空视为通过
 PREREQS_REMOTE = [
-    ("OpenClash 插件", "ls /etc/init.d/openclash"),
-    ("UCI 配置", "uci show openclash 2>/dev/null | head -1"),
-    ("核心二进制", "ls /etc/openclash/core/ 2>/dev/null | head -1"),
-    ("ruby", "command -v ruby"),
-    ("dnsmasq-full", "dnsmasq --version 2>/dev/null | head -1"),
+    ("OpenClash 插件", "ls /etc/init.d/openclash 2>/dev/null", ""),
+    ("UCI 配置", "uci show openclash 2>/dev/null | head -1", ""),
+    ("核心二进制", "ls /etc/openclash/core/ 2>/dev/null | head -1", ""),
+    ("ruby", "command -v ruby", "YAML 生成依赖"),
+    ("ruby-yaml", "ruby -ryaml -e 'puts 1' 2>/dev/null", "YAML 解析（Psych）"),
+    ("dnsmasq-full", "dnsmasq --version 2>/dev/null | grep -o 'ipset\\|nftset' | head -1",
+     "需 full 版（带 ipset/nftset）"),
+    ("ip-full", "command -v ip", "策略路由/地址集"),
+    ("kmod-tun", "ls /lib/modules/*/tun.ko* 2>/dev/null || grep -qw tun /proc/modules && echo ok",
+     "TUN 模式需要"),
 ]
+
+# 按 fw4/fw3 区分的内核模块
+KMOD_NFT = "kmod-nft-tproxy"
+KMOD_IPT = "kmod-ipt-tproxy"
 
 
 def cmd_bootstrap(args):
@@ -313,10 +323,20 @@ def cmd_doctor(args):
                                    "cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_ID; "
                                    "uname -m; command -v fw4 >/dev/null && echo fw4 || echo fw3")
         out("  主机名  : %s" % o.strip().replace("\n", " | "))
-        for name, c in PREREQS_REMOTE:
+        for name, c, hint in PREREQS_REMOTE:
             rc, o2, _ = run_remote(cli, c)
-            mark = "OK " if rc == 0 and o2.strip() else "!! "
-            out("  %s %s" % (mark, name))
+            passed = rc == 0 and o2.strip()
+            mark = "OK " if passed else "!! "
+            extra = "" if passed or not hint else "   <- " + hint
+            out("  %s %s%s" % (mark, name, extra))
+
+        # 透明代理内核模块（按防火墙后端区分）
+        rc, o, _ = run_remote(cli, "command -v fw4 >/dev/null && echo nft || echo ipt")
+        kmod_name = KMOD_NFT if o.strip() == "nft" else KMOD_IPT
+        rc, o2, _ = run_remote(
+            cli, "apk info -e %s 2>/dev/null || opkg list-installed 2>/dev/null | grep -q %s && echo ok" % (kmod_name, kmod_name))
+        out("  %s %s%s" % ("OK " if o2.strip() else "!! ", kmod_name, "" if o2.strip() else "   <- UDP 透明代理需要"))
+
         rc, o3, _ = run_remote(cli, "pidof clash")
         out("  clash 进程: %s" % ("运行中 PID " + o3.strip() if o3.strip() else "未运行"))
     finally:
@@ -483,8 +503,9 @@ echo "### 系统"
 cat /etc/openwrt_release 2>/dev/null | grep -E 'DISTRIB_(ID|RELEASE|TARGET|ARCH)'
 uname -r
 command -v fw4 >/dev/null && echo "firewall: fw4 (nftables)" || echo "firewall: fw3 (iptables)"
+printf 'network role: '; [ "$(uci -q get network.wan.disabled)" = "1" ] && echo "旁路由 (WAN disabled)" || echo "主路由"
 
-echo
+ echo
 echo "### 内存"
 free -m | head -2
 
@@ -500,28 +521,52 @@ printf '配置文件    : '; uci -q get openclash.@openclash[0].config_path
 printf 'API 端口    : '; uci -q get openclash.@openclash[0].cn_port
 
 echo
-echo "### 端口监听"
-netstat -tlnp 2>/dev/null | grep -E '7874|7892|7895|9090|7890|7891|7893' | awk '{print "  "$4" "$7}'
+echo "### 端口监听（读实际配置，非默认值）"
+D=$(uci -q get openclash.@openclash[0].dns_port); D=${D:-7874}
+P=$(uci -q get openclash.@openclash[0].proxy_port); P=${P:-7892}
+T=$(uci -q get openclash.@openclash[0].tproxy_port); T=${T:-7895}
+H=$(uci -q get openclash.@openclash[0].http_port); H=${H:-7890}
+S=$(uci -q get openclash.@openclash[0].socks_port); S=${S:-7891}
+M=$(uci -q get openclash.@openclash[0].mixed_port); M=${M:-7893}
+C=$(uci -q get openclash.@openclash[0].cn_port); C=${C:-9090}
+for port in "$D" "$P" "$T" "$H" "$S" "$M" "$C"; do
+  line=$(netstat -tlnp 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") {print $4"  "$7; exit}')
+  printf '  %-6s %s\n' "$port" "${line:-（未监听）}"
+done
 
 echo
-echo "### 配置文件"
-ls -la /etc/openclash/config/*.yaml 2>/dev/null | awk '{print "  "$5" "$9}'
+echo "### 配置文件（源文件与运行配置）"
+CFG=$(uci -q get openclash.@openclash[0].config_path)
+[ -n "$CFG" ] && ls -la "$CFG" 2>/dev/null | awk '{print "  源文件: "$5" "$9}'
+NAME=$(basename "$CFG" 2>/dev/null)
+[ -n "$NAME" ] && ls -la "/etc/openclash/$NAME" 2>/dev/null | awk '{print "  运行:   "$5" "$9}'
+ls -la /etc/openclash/config/*.yaml 2>/dev/null | sed 's/^/  /'
 
 echo
-echo "### 覆写模块"
-ls /etc/openclash/overwrite/ 2>/dev/null | sed 's/^/  /'
-echo "  UCI 条目:"
-uci show openclash 2>/dev/null | grep -E 'config_overwrite\[[0-9]+\]\.(name|enable|config)' | sed 's/^/    /'
+echo "### 覆写模块（三关：文件 + UCI 条目 + enable=1）"
+ls /etc/openclash/overwrite/ 2>/dev/null | sed 's/^/  文件: /'
+uci show openclash 2>/dev/null | grep -E 'config_overwrite\[[0-9]+\]\.(name|enable|config)' | sed 's/^/  UCI:  /'
+printf '  日志中处理过的模块数: '; n=$(grep -c 'Overwrite Module' /tmp/openclash.log 2>/dev/null); echo "${n:-0}"
 
 echo
-echo "### 防火墙链"
-nft list chain inet fw4 openclash 2>/dev/null | head -3
-nft list chain inet fw4 dstnat 2>/dev/null | grep -c 'OpenClash DNS' | sed 's/^/  DNS劫持规则数: /'
-ip rule show 2>/dev/null | grep 0x162 | sed 's/^/  策略路由: /'
+echo "### 防火墙"
+if command -v fw4 >/dev/null 2>&1; then
+  nft list chain inet fw4 openclash 2>/dev/null | head -3
+  printf '  DNS 劫持规则数: '; nft list chain inet fw4 dstnat 2>/dev/null | grep -c 'OpenClash DNS'
+  ip rule show 2>/dev/null | grep 0x162 | sed 's/^/  策略路由: /'
+else
+  iptables -t nat -L openclash -n 2>/dev/null | head -3
+  iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c 'OpenClash DNS' | sed 's/^/  DNS 劫持规则数: /'
+fi
 
 echo
 echo "### 最近启动日志"
 tail -6 /tmp/openclash_start.log 2>/dev/null | sed 's/^/  /'
+
+echo
+echo "### 最近错误"
+tail -80 /tmp/openclash.log 2>/dev/null | grep -E 'level=(error|fatal)' | tail -5 | sed 's/^/  /'
+[ -z "$(tail -80 /tmp/openclash.log 2>/dev/null | grep -E 'level=(error|fatal)')" ] && echo "  (无)"
 '''
 
 
@@ -540,23 +585,25 @@ def cmd_probe(args):
 
 # ---------------------------------------------------------------- transfer
 def _local_path(p):
-    """把 Git-Bash/MSYS 风格的 /c/... 或 /tmp/... 本地路径转成 Windows 可识别路径。
-    Windows 上 Python 无法打开字面量 '/tmp/x'。"""
+    """把 Git-Bash/MSYS 风格的本地路径转成 Windows 可识别路径。
+
+    Windows 上 Python 无法打开字面量 '/tmp/x' 或 '/c/Users/x'。
+    这里按模式转换（不依赖路径是否存在），因为目标文件可能尚未创建。
+    """
     if os.name != "nt" or not p:
         return p
+
     q = p.replace("/", os.sep)
+    # /tmp/... -> 真正的 Windows 临时目录（MSYS 的 /tmp 是个虚拟挂载）
+    for root in (os.environ.get("TEMP"), os.environ.get("TMP"),
+                 os.path.expanduser("~/AppData/Local/Temp")):
+        if root and (q == os.sep + "tmp" or q.startswith(os.sep + "tmp" + os.sep)):
+            rest = q[len(os.sep + "tmp"):].lstrip(os.sep)
+            return os.path.join(root, rest) if rest else root
     # /c/Users/... -> C:/Users/...
     if len(q) >= 2 and q[0] == os.sep and q[1].isalpha() and (len(q) == 2 or q[2] == os.sep):
-        q = q[1].upper() + ":" + q[2:]
-    if os.path.exists(q):
-        return q
-    # /tmp/x -> MSYS 临时目录
-    for root in (os.environ.get("TEMP"), os.environ.get("TMP"), os.path.expanduser("~/AppData/Local/Temp")):
-        if root and q.startswith(os.sep + "tmp" + os.sep):
-            cand = os.path.join(root, q.split(os.sep + "tmp" + os.sep, 1)[1])
-            if os.path.exists(cand):
-                return cand
-    return q if os.path.exists(q) else p
+        return q[1].upper() + ":" + q[2:]
+    return q if os.sep in q or os.sep in p else p
 
 
 def _remote_path(p):
