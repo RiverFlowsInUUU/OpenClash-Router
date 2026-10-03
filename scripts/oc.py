@@ -7,6 +7,7 @@ oc.py — OpenWrt / OpenClash 管理入口 (通用技能)
   doctor              检查环境与配置状态，告诉你还缺什么
   bootstrap           安装/检查本地依赖 (paramiko / cryptography)
   where               打印技能/脚本/配置的绝对路径
+  safety              设备侧安全检查（改配置前：备份/目标一致性/核心状态）
   setup               配置连接 (生成密钥 -> 部署公钥 -> 验证 -> 保存)
   run "<cmd>"         在路由器执行命令 (多条用 ; 或换行)
   probe               一览 OpenClash 运行状态 (只读)
@@ -707,6 +708,76 @@ def cmd_where(args):
     return 0
 
 
+def cmd_safety(args):
+    """设备侧安全检查（动线 A ⑧ 之前用）。
+
+    与其它闸门（tests/）性质不同：那些守仓库，这道守"改设备前的前提"。
+    即：改错了会断网且 git 救不了，所以替换前必须有两个前提成立：
+      D1 备份存在（回滚依据 —— git 救不了路由器）
+      D2 目标文件与源配置内容一致（确认你改的就是正在用的那份）
+
+    退出码：0=通过 / 1=判负 / 2=环境不达标 / 3=SKIP（未连接）
+    """
+    cfg, _ = load_config()
+    remote = _remote_path(args.config)
+    timeout = args.timeout
+    fails = False
+
+    cli = connect(cfg)
+    try:
+        rc, o, e = run_remote(cli, "echo PROBE_OK", timeout=timeout)
+        if rc != 0 or "PROBE_OK" not in o:
+            print("SKIP  无法执行远端命令")
+            return 3
+
+        # D1 备份存在（回滚依据）
+        rc, o, _ = run_remote(
+            cli, "ls -1 %s.bak-* 2>/dev/null | tail -1" % shlex.quote(remote),
+            timeout=timeout)
+        backup = ""
+        for line in o.splitlines():
+            line = line.strip()
+            if ".bak-" in line:
+                backup = line      # 最后一行命中（tail -1）
+        if backup:
+            print("OK    D1 备份存在: %s" % backup)
+        else:
+            print("FAIL  D1 %s 没有备份（.bak-*）—— 先 cp -a 再改，否则无法回滚" % remote)
+            fails = True
+
+        # D2 目标文件与当前运行配置是同一份（确认改的不是死文件）
+        rc, o, _ = run_remote(
+            cli, "uci -q get openclash.@openclash[0].config_path",
+            timeout=timeout)
+        active = ""
+        for line in o.splitlines():
+            if line.startswith("/"):
+                active = line.strip()
+        if not active:
+            print("WARN  D2 读不到当前 config_path，跳过一致性检查")
+        elif os.path.normpath(active) == os.path.normpath(remote):
+            print("OK    D2 目标文件就是当前生效配置: %s" % active)
+        else:
+            print("FAIL  D2 目标 %s 不是当前生效配置（%s）—— 改了也白改" % (remote, active))
+            fails = True
+
+        # D3 核心在跑（否则改完没有可验证的运行时）
+        rc, o, _ = run_remote(cli, "pidof clash", timeout=timeout)
+        if o.strip():
+            print("OK    D3 核心运行中 PID %s" % o.strip().split()[0])
+        else:
+            print("WARN  D3 核心未运行 —— 改完后需 restart 才能验证")
+
+        if fails:
+            print("\n判负：改设备前的前提未满足 —— 不要继续替换")
+            print("提示：git 救不了路由器，备份是唯一回滚依据（见 reference/two-layers.md）")
+            return 1
+        print("\n通过：改设备的安全前提已满足")
+        return 0
+    finally:
+        cli.close()
+
+
 def cmd_show_config(args):
     cfg, p = load_config()
     safe = dict(cfg)
@@ -789,6 +860,10 @@ def main():
     r.add_argument("command", nargs="+", help="要执行的命令（多个词会拼成一条；多命令用 ; 分隔）")
     r.add_argument("--timeout", type=int, default=None, help="超时秒数（默认不限）")
 
+    s = sub.add_parser("safety", help="设备侧安全检查（改配置前：备份/目标一致性/核心状态）")
+    s.add_argument("--config", help="即将修改的配置文件路径（路由器上）")
+    s.add_argument("--timeout", type=int, default=60, help="每步超时秒数")
+
     pu = sub.add_parser("push", help="上传本地文件到路由器")
     pu.add_argument("local", help="本地文件路径")
     pu.add_argument("remote", help="远端目标路径")
@@ -811,6 +886,7 @@ def main():
         "doctor": cmd_doctor,
         "bootstrap": cmd_bootstrap,
         "where": cmd_where,
+        "safety": cmd_safety,
         "setup": cmd_setup,
         "run": cmd_run,
         "probe": cmd_probe,
