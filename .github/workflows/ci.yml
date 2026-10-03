@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  validate:
+  gates:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -21,140 +21,22 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: 校验 SKILL.md frontmatter
-        run: |
-          python - <<'PY'
-          import re, sys, pathlib
-          p = pathlib.Path("SKILL.md")
-          if not p.is_file():
-              sys.exit("SKILL.md 不存在")
-          text = p.read_text(encoding="utf-8")
-          m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
-          if not m:
-              sys.exit("SKILL.md 缺少 YAML frontmatter（需以 --- 开头和结尾）")
-          fm = m.group(1)
+      # 每道闸门单独一步 —— 便于在 GitHub UI 一眼看出红的是哪道。
+      # ⚠️ 本清单必须与 tests/verify_all.py 的 GATES 同源，改一侧同步另一侧。
 
-          name = re.search(r"^name:\s*(\S+)\s*$", fm, re.M)
-          desc = re.search(r"^description:\s*(.+)$", fm, re.M)
-          if not name:
-              sys.exit("frontmatter 缺少 name")
-          if not desc:
-              sys.exit("frontmatter 缺少 description")
+      - name: 闸门 · SKILL.md 合规
+        run: python tests/check_skill_md.py
 
-          n = name.group(1)
-          d = desc.group(1).strip()
+      - name: 闸门 · 凭据扫描（红线）
+        run: python tests/check_secrets.py
 
-          # Agent Skills 规范: 小写字母/数字/连字符, 无首尾或连续连字符, <=64 字符
-          if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", n):
-              sys.exit(f"name 格式违规: {n!r}（只允许小写字母、数字、单连字符）")
-          if len(n) > 64:
-              sys.exit(f"name 过长: {len(n)} > 64")
-          if len(d) > 1024:
-              sys.exit(f"description 过长: {len(d)} > 1024")
+      - name: 闸门 · 可移植性（行尾/BOM/编码）
+        run: python tests/check_portability.py
 
-          print(f"OK  name={n} ({len(n)} 字符)")
-          print(f"OK  description ({len(d)} 字符)")
-          print(f"OK  正文 {len(text)} 字符")
-          PY
+      - name: 闸门 · Python 语法
+        run: python -m py_compile scripts/oc.py && echo "OK oc.py 语法正确"
 
-      - name: 校验目录结构
-        run: |
-          python - <<'PY'
-          import os, sys
-          required = ["SKILL.md", "scripts/oc.py", "README.md", "LICENSE"]
-          missing = [f for f in required if not os.path.isfile(f)]
-          if missing:
-              sys.exit("缺少必需文件: " + ", ".join(missing))
-          print("OK  目录结构完整")
-          PY
-
-      - name: SKILL.md 长度（渐进披露原则，建议 <500 行）
-        run: |
-          python - <<'PY'
-          import sys
-          n = sum(1 for _ in open("SKILL.md", encoding="utf-8"))
-          print(f"SKILL.md 行数: {n}")
-          if n > 500:
-              sys.exit(f"过长（{n} > 500），应考虑外置到 references/")
-          print("OK  在建议长度内")
-          PY
-
-      - name: Python 语法检查
-        run: python -m py_compile scripts/oc.py && echo "OK  scripts/oc.py 语法正确"
-
-      - name: CLI 可用性检查
-        run: |
-          python -m pip install --quiet paramiko
-          python scripts/oc.py --help >/dev/null
-          python scripts/oc.py doctor || true   # 未配置属预期，不应崩
-          echo "OK  CLI 可运行"
-
-      - name: SKILL.md 引用的子命令都存在
-        run: |
-          python - <<'PY'
-          import re, pathlib, subprocess, sys
-          text = pathlib.Path("SKILL.md").read_text(encoding="utf-8")
-          if "oc.py" not in text:
-              sys.exit("SKILL.md 未提及 oc.py")
-
-          known_cmds = {"doctor", "bootstrap", "where", "setup", "probe",
-                        "run", "push", "pull", "show-config", "forget"}
-
-          # 捕获两种引用形式:  oc.py <cmd>   以及   $OC <cmd>
-          used = set(re.findall(r'oc\.py"?\s+([a-z][a-z-]+)', text))
-          used |= set(re.findall(r'\$OC\s+([a-z][a-z-]+)', text))
-          used -= {"scripts"}
-
-          unknown = sorted(c for c in used if c not in known_cmds)
-          if unknown:
-              sys.exit("SKILL.md 引用了不存在的子命令: " + ", ".join(unknown))
-
-          # 同时确认 oc.py --help 不报错
-          r = subprocess.run(
-              [sys.executable, "scripts/oc.py", "--help"],
-              capture_output=True, text=True, encoding="utf-8", errors="replace"
-          )
-          if r.returncode != 0:
-              sys.exit("--help 返回非 0")
-          print(f"OK  引用的子命令均存在: {', '.join(sorted(used))}")
-          PY
-
-      - name: 检查是否误提交了大体积/过期内容
-        run: |
-          python - <<'PY'
-          import os, sys
-          # 不应对官方知识库做本地副本（会过期，应引用官方 URL）
-          banned_paths = ["references/openclash-guide.md"]
-          found = [p for p in banned_paths if os.path.exists(p)]
-          if found:
-              sys.exit("不应内置官方知识副本（改为引用官方 URL）: " + ", ".join(found))
-          # 单文件不超过 200KB
-          for root, dirs, files in os.walk("."):
-              dirs[:] = [d for d in dirs if d != ".git"]
-              for f in files:
-                  p = os.path.join(root, f)
-                  if os.path.getsize(p) > 200 * 1024:
-                      sys.exit(f"文件过大（>200KB）: {p}")
-          print("OK  无过期内容/超大文件")
-          PY
-
-      - name: SKILL.md 中声称的文件行数与实际一致
-        run: |
-          python - <<'PY'
-          import re, sys, pathlib
-          t = pathlib.Path("SKILL.md").read_text(encoding="utf-8")
-          actual = sum(1 for _ in open("scripts/oc.py", encoding="utf-8"))
-          m = re.search(r"它有约? ?(\d+)\+? ?行", t)
-          if m:
-              claimed = int(m.group(1))
-              if abs(claimed - actual) > 50:
-                  sys.exit(f"SKILL.md 声称 oc.py 有 {claimed} 行，实际 {actual} 行，偏差过大")
-              print(f"OK  行数声称一致（声称 {claimed}，实际 {actual}）")
-          else:
-              print("SKIP  SKILL.md 未声称行数")
-          PY
-
-      - name: 退出码语义（仅测不需真实路由器的分支）
+      - name: 闸门 · 退出码语义（不需真实路由器）
         run: |
           set +e
           fail=0
@@ -169,57 +51,16 @@ jobs:
               echo "OK  $desc (exit=$got)"
             fi
           }
-          # 这些在连接前就会失败，无需真实路由器，也不需已配置
-          check "run 空命令"           2  python scripts/oc.py run ""
-          check "push 本地文件不存在"   9  python scripts/oc.py push /nonexistent-xyz /root/ci-xyz
-          # OC_CONFIG 显式指向不存在的文件 → 应报 5（不静默回退）
-          check "OC_CONFIG 指向不存在"  5  env OC_CONFIG=/tmp/nope-ci.json python scripts/oc.py doctor
+          check "run 空命令"          2  python scripts/oc.py run ""
+          check "push 本地文件不存在"  9  python scripts/oc.py push /nonexistent-xyz /root/ci-xyz
+          check "OC_CONFIG 指向不存在" 5  env OC_CONFIG=/tmp/nope-ci.json python scripts/oc.py doctor
           rm -f /tmp/nope-ci.json
           exit $fail
 
-      - name: 敏感文件泄露检查
-        run: |
-          python - <<'PY'
-          import os, re, subprocess, sys
-          # 1. 禁止出现的文件名
-          banned = ("config.json", "id_ed25519", ".oc_creds.json")
-          found = []
-          for root, dirs, files in os.walk("."):
-              dirs[:] = [d for d in dirs if d != ".git"]
-              for f in files:
-                  if f in banned:
-                      found.append(os.path.join(root, f))
-          if found:
-              sys.exit("发现敏感文件: " + ", ".join(found))
-
-          # 2. 禁止出现的凭据模式
-          pats = [
-              (r"ghp_[A-Za-z0-9]{30,}", "GitHub token"),
-              (r"github_pat_[A-Za-z0-9_]{30,}", "GitHub PAT"),
-              (r"AGE-SECRET-KEY-1[A-Z0-9]{50,}", "age 私钥"),
-              (r"-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----", "私钥"),
-          ]
-          hits = []
-          for root, dirs, files in os.walk("."):
-              dirs[:] = [d for d in dirs if d != ".git"]
-              for f in files:
-                  path = os.path.join(root, f)
-                  try:
-                      text = open(path, encoding="utf-8", errors="ignore").read()
-                  except Exception:
-                      continue
-                  for pat, label in pats:
-                      if re.search(pat, text):
-                          hits.append(f"{path} ({label})")
-          if hits:
-              sys.exit("发现疑似凭据: " + ", ".join(hits))
-          print("OK  无敏感文件/凭据")
-          PY
-
-      - name: 行尾检查（应为 LF）
-        run: |
-          if grep -rlI $'\r' --exclude-dir=.git . ; then
-            echo "::error::以下文件含 CRLF 行尾，应为 LF"
-            exit 1
-          fi
-          echo "OK  全部文件为 LF 行尾"
+      - name: 闸门 · 运行时编码（Windows ACP=936 等价路径）
+        # Windows 中文环境下子进程 stdout 走 cp936 —— 脚本 print 非 GBK 字符
+        # 却无 reconfigure 保护时会崩成退出码 1，被误读为「判负」。
+        # 这里用 PYTHONIOENCODING=cp936 在 Linux 上等价复现。
+        run: python tests/verify_all.py
+        env:
+          PYTHONIOENCODING: cp936

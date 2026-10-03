@@ -1,12 +1,35 @@
-# 本地连接配置（绝不上传）
+# ── 本工具的连接配置（绝不上传）─────────────────────────────
 config.json
 .oc_creds.json
 .oc_creds.json.example
-*.bak
-__pycache__/
-*.pyc
 
-# 编辑器
+# ── 私钥 / 凭据兜底 ────────────────────────────────────────
+*.key
+*.pem
+*.p12
+id_ed25519*
+id_rsa*
+known_hosts
+.env
+.env.*
+
+# ── 工作产物 ───────────────────────────────────────────────
+work/
+*.bak
+*.bak-*
+*.log
+*.tmp
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── 编辑器 / 系统 ──────────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+*~
 .DS_Store
+Thumbs.db
+desktop.ini
