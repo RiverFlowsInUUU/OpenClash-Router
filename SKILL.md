@@ -162,11 +162,40 @@ OpenWrt 官方对 `reload` 的通用语义是「重载配置（通常发 SIGHUP�
 |------------|--------|------------|
 | **① OpenClash 插件层**<br>UCI/LuCI 选项、防火墙链、覆写模块语法、订阅处理 | [OpenClash 官方知识库](https://github.com/vernesong/OpenClash/blob/master/.github/skills/openclash-user-guide/SKILL.md) | 它讲的是「插件怎么把 UI 选项变成 Mihomo 配置」 |
 | **② Mihomo 配置层**<br>字段含义/取值、DNS 策略、分流规则、各代理协议参数 | [Mihomo Wiki](https://wiki.metacubex.one/config/) · [Meta-Docs 仓库](https://github.com/MetaCubeX/Meta-Docs/tree/main/docs/config) | 配置字段的**权威定义**（Meta-Docs 按 config/dns、config/proxies、config/rules… 分类） |
-| **③ 内核实底层**<br>「为什么这个字段不生效」、行为细节、边界 | [mihomo 内核源码](https://github.com/MetaCubeX/mihomo/tree/Alpha) | 文档没写清的，源码是唯一真相（见下方定位表） |
+| **③ 内核实底层**<br>「为什么这个字段不生效」、行为细节、边界 | 看当前用的是哪个内核（见下方「先分内核」） | 文档没写清的，源码是唯一真相（见下方定位表） |
 | **④ 已知问题/报错** | [OpenClash Issues](https://github.com/vernesong/OpenClash/issues)（插件侧）· [Mihomo Issues](https://github.com/MetaCubeX/mihomo/issues)（内核侧） | 先搜再问；优先看作者/维护者回复与高赞方案 |
 
 > ⚠️ 先判断问题在哪一层 —— 把「插件层」的问题拿去查内核文档、
 > 或把「内核行为」问题当成插件 bug，都会绕远路。
+
+### ⚠️ 先分内核：Smart 内核 ≠ 上游内核
+
+OpenClash 自带一个**改装过的 Mihomo 内核**（作者 vernesong），多了一个上游没有的
+`smart` 策略组（LightGBM 模型预测节点质量）。**查文档前先确认用的是哪个**：
+
+```bash
+$OC run "uci get openclash.@openclash[0].core_type"   # Smart 或 Meta
+$OC run "/etc/openclash/clash -v | head -1"           # 看版本串里有无 alpha-smart
+```
+
+用户机器上实测：`core_type=Smart`，版本串含 `alpha-smart`。
+
+| | 上游内核 | Smart 内核 |
+|---|---|---|
+| 仓库 | [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo/tree/Alpha) | [vernesong/mihomo](https://github.com/vernesong/mihomo/tree/Alpha)（**fork** 自上游，加 Smart） |
+| 特性 | 官方全部功能 | 上游全部 + `smart` 策略组 + LightGBM 模型 |
+| 发布 | Releases | [Releases: `Prerelease-Alpha`](https://github.com/vernesong/mihomo/releases)（`mihomo-<arch>-alpha-smart-<sha>.gz`）+ `LightGBM-Model` |
+| 源码关键路径 | — | `component/smart/`（weight/store/lightgbm）· `adapter/outboundgroup/smart.go` |
+| Issues | 有（活跃） | ❌ **无 Issues 通道**（`has_issues=false`）—— 别去那里提问 |
+
+**所以遇到 smart 相关问题的查法**：
+
+1. **配置层**：`type: smart` 的字段 —— 上游文档没有，只能看
+   [`adapter/outboundgroup/smart.go`](https://github.com/vernesong/mihomo/tree/Alpha/adapter/outboundgroup) 与 [`component/smart/`](https://github.com/vernesong/mihomo/tree/Alpha/component/smart)
+2. **下载/版本**：看 [Releases](https://github.com/vernesong/mihomo/releases)（只有 `Prerelease-Alpha` 一个 tag，滚动更新）
+3. **LightGBM 模型**：独立 release `LightGBM-Model`（`Model.bin`）
+4. **提问**：Smart 无 Issues ⇒ 去 [OpenClash Issues](https://github.com/vernesong/OpenClash/issues)（同一作者）
+5. **共性行为**：smart 以外的内核行为，仍以上游文档/源码为准
 
 ### 怎么取用（可照抄）
 
@@ -186,12 +215,15 @@ curl -sL -o /tmp/mihomo-config.yaml \
   https://raw.githubusercontent.com/MetaCubeX/mihomo/Alpha/docs/config.yaml
 
 # ③ 内核层：在源码里定位实现（比读全仓快）
-#    用 GitHub 代码搜索： https://github.com/search?q=repo%3AMetaCubeX%2Fmihomo+关键词&type=code
+#    上游： https://github.com/search?q=repo%3AMetaCubeX%2Fmihomo+关键词&type=code
+#    Smart：https://github.com/search?q=repo%3Avernesong%2Fmihomo+关键词&type=code
 ```
 
 ### ③ 内核实底层 · 关键词 → 源码位置
 
-问题渗到「文档没说清、字段不生效」时，去源码找答案。常见入口：
+问题渗到「文档没说清、字段不生效」时，去源码找答案。
+**先确认内核**（上方）—— Smart 问题去 `vernesong/mihomo`，其余去上游。
+常见入口（两边目录结构同源）：
 
 | 想查什么 | 去哪个目录 |
 |---------|-----------|
@@ -200,6 +232,7 @@ curl -sL -o /tmp/mihomo-config.yaml \
 | DNS（fake-ip、nameserver-policy、fallback 行为） | `dns/` · `component/resolver/` |
 | 入口/TUN/透明代理 | `listener/`（含 `sing_tun/`） |
 | 代理协议实现（vless/hysteria/tuic…） | `adapter/outbound/` |
+| **Smart 策略组 / LightGBM**（仅 Smart 内核） | `adapter/outboundgroup/smart.go` · `component/smart/` |
 | 完整配置示例 | [`docs/config.yaml`](https://github.com/MetaCubeX/mihomo/blob/Alpha/docs/config.yaml) |
 
 > 注：`MetaCubeX/mihomo` 的仓库 description 字面显示成别的东西（实测是无关内容），
@@ -282,6 +315,13 @@ Fake-IP 模式下 `dig` 无意义（返回假 IP），要看规则命中。
 
 **清理内存**：先出表格（服务/占用/作用/风险）给用户选，别自作主张卸。
 `clash` 占 200MB 属正常，别动。
+
+**Smart 策略组相关**（`type: smart` / LightGBM 模型 / `uselightgbm`）：
+这是 OpenClash 作者自制的内核特性，**上游文档里没有** ——
+字段含义与行为去 [vernesong/mihomo](https://github.com/vernesong/mihomo/tree/Alpha)
+（`adapter/outboundgroup/smart.go` · `component/smart/`），
+版本/模型去 [Releases](https://github.com/vernesong/mihomo/releases)。
+注意：**该仓无 Issues 通道**，提问去 OpenClash Issues（同一作者）。
 
 ---
 
