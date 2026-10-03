@@ -692,12 +692,23 @@ def cmd_push(args):
     cfg, _ = load_config()
     cli = connect(cfg)
     try:
+        # 先确认远端父目录存在 —— 否则 SFTP 会抛裸 traceback，
+        # 对 agent 毫无意义（实测踩过）。
+        parent = posixpath.dirname(remote) or "/"
+        rc, o, _ = run_remote(cli, "[ -d %s ] && echo yes || echo no" % shlex.quote(parent))
+        if "yes" not in o:
+            die("远端目录不存在: %s  —— 先用 run 建目录，或确认路径写对了" % parent, 12)
+
         sftp = cli.open_sftp()
-        sftp.put(local, remote)
-        # 上传后必须核字节数：SFTP 可能静默截断（实测过），
-        # 而 clash -t 对截断/不存在的文件照样报 successful —— 不核实就会断网。
-        remote_size = sftp.stat(remote).st_size
-        sftp.close()
+        try:
+            sftp.put(local, remote)
+            # 上传后必须核字节数：SFTP 可能静默截断（实测过），
+            # 而 clash -t 对截断/不存在的文件照样报 successful —— 不核实就会断网。
+            remote_size = sftp.stat(remote).st_size
+        except IOError as exc:
+            die("上传失败: %s -> %s（%s）" % (local, remote, exc), 13)
+        finally:
+            sftp.close()
         if remote_size != local_size:
             die("上传后字节数不一致：本地 %d，远端 %d（传输被截断？）"
                 % (local_size, remote_size), 11)
@@ -801,10 +812,13 @@ def cmd_deploy_check(args):
         for line in o.splitlines():
             if line.strip().isdigit():
                 found = int(line.strip())
-        if found >= 2:
-            print("OK    D3 关键段落齐全（proxies/proxy-groups/rules 命中 %d）" % found)
+        # 三个关键段落都必须存在（proxies / proxy-groups / rules）。
+        # 阈值放宽到 2 会让"尾部被截断"的文件蒙混过关（实测：截到 45000
+        # 字节时三段都还在，D3 报通过）。
+        if found >= 3:
+            print("OK    D3 关键段落齐全（proxies/proxy-groups/rules 全在）")
         else:
-            fails.append("D3 关键段落缺失（只命中 %d 个，似是被截断或被替换成了残片）" % found)
+            fails.append("D3 关键段落缺失（只命中 %d/3 个，似是被截断或被替换成了残片）" % found)
 
         if fails:
             for f in fails:

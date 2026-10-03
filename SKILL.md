@@ -378,9 +378,13 @@ python "$SKILL/scripts/oc.py" setup --host <IP> --user root --password '<密码>
 | `5` | `OC_CONFIG` 指定的文件不存在 |
 | `6` | 认证失败 → 重跑 `setup` |
 | `7` | 连不上 → `ping` |
+| `8` | `setup` 密钥验证失败（未保存配置） |
 | `9` / `10` | push / pull 的文件不存在 |
 | `11` | push 后字节数不符（传输被截断） |
+| `12` | push 的远端目录不存在 |
+| `13` | push 上传本身失败 |
 | `124` | 超时 → 加 `--timeout <秒>` |
+| `130` | 被 Ctrl+C 中断 |
 
 ---
 
