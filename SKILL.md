@@ -39,10 +39,18 @@ $OC pull /etc/openclash/config/proxy.yaml ./work/proxy.yaml
 
 # ③ 本地编辑（Python 精确匹配，保留缩进/注释；不要用 sed）
 
-# ④ 内核校验（不影响线上就能发现语法错）
-$OC push ./work/proxy.yaml /tmp/proxy.yaml
+# ④ 部署前检查 + 内核校验（两个闸门，都要过）
+#    为什么两个：实测 clash -t 只抓 YAML 语法错，**不查存在性/完整性**：
+#      · 文件不存在  → 照样报 "test is successful"
+#      · 50638 字节截断到 1000 字节 → 照样报 successful
+#    所以先 deploy-check 自己查，再用 clash -t 补语法检查。
+$OC push ./work/proxy.yaml /tmp/proxy.yaml     # push 会自动核字节数
+$OC deploy-check --local ./work/proxy.yaml --remote /tmp/proxy.yaml
+#    D1 远端存在非空 / D2 字节数一致 / D3 关键段落齐全 —— 全过才继续
 $OC run "/etc/openclash/clash -t -d /etc/openclash -f /tmp/proxy.yaml"
-#    看到 "test is successful" 才继续；不过就查官方文档（§3）
+#    “test is successful” 且退出码0 才继续；不过就查官方文档（§3）
+#    注：这里验的是**待部署的新文件**（部署前闸门）。OpenClash 官方
+#        文档里的同款命令验的是当前 config_path（诊断用），两者互补。
 
 # ⑤ 备份 → 替换 → 重启
 $OC run "cp -a /etc/openclash/config/proxy.yaml \
@@ -85,15 +93,32 @@ $OC run "rm -f /tmp/proxy.yaml"
 ⑥ 单独一步 → **restart 返回 ≠ 核心就绪**（它只保证配置已重新生成，
 就绪是后台在做的）——文件写对只是前提，运行时真就绪才算成。
 
-**重载方式的选择**（改了什么决定用哪个）：
+**重载方式的选择**（改了什么决定用哪个 —— 依据 OpenClash 官方「热生效 vs 需重启」表）：
 
-| 改了什么 | 用什么重载 | 会重新生成运行配置吗 |
-|---------|-----------|------------------|
-| 源配置 `config/<name>.yaml` | `/etc/init.d/openclash restart` | ✅ 是（跑 `yml_change.sh`） |
-| 防火墙 / 访问控制 | `/etc/init.d/openclash reload` | ❌ 只重建防火墙链 |
-| 策略组选择 | 内核 API `PUT /configs` | ❌ 热改 |
+| 改了什么 | 用什么重载 | 会重新生成运行配置吗 | 延迟 |
+|---------|-----------|------------------|------|
+| 源配置 `config/<name>.yaml` | `/etc/init.d/openclash restart` | ✅ 是（跑 `yml_change.sh`） | ~3-5s |
+| 端口 / TUN / DNS / 覆写 | 同上（需重启核心） | ✅ | ~3-5s |
+| 防火墙规则 | `/etc/init.d/openclash reload` | ❌ 只重建防火墙链 | 即时 |
+| **访问控制（黑白名单）** | **需 restart**（重建防火墙链）⚠️ | — | ~5s |
+| 代理模式 / 日志级别 / Sniffer / 规则 | 内核 API `PATCH /configs` | ❌ 热改 | 即时 |
+| 策略组选择 | 内核 API `PUT /configs` | ❌ 热改 | 即时 |
 
-改了源配置**必须用 restart** —— `reload` 不会重新生成运行配置，改动进不去。
+⚠️ **OpenClash 的 `reload` 只重建防火墙链，不重载配置文件。**
+OpenWrt 官方对 `reload` 的通用语义是「重载配置（通常发 SIGHUP）」，
+但 OpenClash 的实现是防火墙专用 —— 所以改了源配置**必须用 `restart`**，
+否则改动进不去运行配置。
+
+```
+改了什么              → 重载方式
+─────────────────────────────────────────
+源配置 yaml           → restart（必须）
+端口/TUN/DNS/覆写     → restart
+访问控制黑白名单       → restart
+防火墙规则            → reload（即时）
+代理模式/日志/Sniffer → API PATCH /configs
+策略组选择            → API PUT /configs
+```
 
 **push 是独立确认项**：用户说「改吧」只授权本地/设备改动；说「推」才 `git push`。
 
@@ -109,9 +134,12 @@ $OC run "rm -f /tmp/proxy.yaml"
 2. **改前备份，把回滚方式告诉用户。** 路由器没有 git ——
    `cp -a` 的备份是唯一退路，用户要能自己退回去。
 
-3. **先校验再替换，改后用二级闸门确认就绪。** `clash -t` 不通过绝不覆盖，
-   否则核心起不来直接断网；`restart` 会立即返回（内部是后台的），
-   必须用 §1 ⑥ 等就绪（`/group` 返回 200）+ 查日志 + 真实链路测试才算成功。
+3. **先校验再替换，改后用二级闸门确认就绪。** 校验有两道，缺一不可：
+   `deploy-check`（存在/字节数/关键段落）+ `clash -t`（语法）。
+   ⚠️ **`clash -t` 单独用不可信** —— 实测它对**不存在的文件**和**截断的文件**
+   都报 `test is successful`（只抓 YAML 语法错）。不通过绝不覆盖；
+   `restart` 会立即返回（内部是后台的），必须用 §1 ⑥ 等就绪
+   （`/group` 返回 200）+ 查日志 + 真实链路测试才算成功。
 
 4. **防失联。** 改防火墙/DNS/SSH 前想清楚「改坏了怎么连回来」：
    - 改 SSH/dropbear 最后做，别弄断当前会话
@@ -224,7 +252,7 @@ Fake-IP 模式下 `dig` 无意义（返回假 IP），要看规则命中。
 ## 6 · 工具箱
 
 所有操作通过 `scripts/oc.py`（黑盒调用，用 `--help` 看用法，**别读源码** ——
-约 920 行会挤占上下文）。
+约 1020 行会挤占上下文）。
 
 ```bash
 python <技能目录>/scripts/oc.py where      # 打印技能/脚本/配置绝对路径
@@ -236,6 +264,7 @@ python <技能目录>/scripts/oc.py where      # 打印技能/脚本/配置绝�
 | `setup` | 配置连接（生成密钥、部署公钥、验证） |
 | `probe` | OpenClash 状态总览（只读） |
 | `safety --config <路径>` | 改前检查：有备份 / 目标是生效配置 / 核心在跑 |
+| `deploy-check --local <本地> --remote <远端>` | 部署前完整性检查（`clash -t` 的前置） |
 | `run "<cmd>"` | 在路由器执行命令（多个词自动拼一条；多命令用 `;`） |
 | `push` / `pull` | 上传 / 下载文件 |
 | `where` | 打印技能/脚本/配置绝对路径 |
@@ -274,6 +303,7 @@ python "$SKILL/scripts/oc.py" setup --host <IP> --user root --password '<密码>
 | `6` | 认证失败 → 重跑 `setup` |
 | `7` | 连不上 → `ping` |
 | `9` / `10` | push / pull 的文件不存在 |
+| `11` | push 后字节数不符（传输被截断） |
 | `124` | 超时 → 加 `--timeout <秒>` |
 
 ---

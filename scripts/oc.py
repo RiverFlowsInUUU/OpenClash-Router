@@ -7,6 +7,7 @@ oc.py — OpenWrt / OpenClash 管理入口 (通用技能)
   doctor              检查环境与配置状态，告诉你还缺什么
   bootstrap           安装/检查本地依赖 (paramiko / cryptography)
   where               打印技能/脚本/配置的绝对路径
+  deploy-check        部署前完整性检查（clash -t 的前置）
   safety              设备侧安全检查（改配置前：备份/目标一致性/核心状态）
   setup               配置连接 (生成密钥 -> 部署公钥 -> 验证 -> 保存)
   run "<cmd>"         在路由器执行命令 (多条用 ; 或换行)
@@ -652,19 +653,33 @@ def _local_path(p):
 
 
 def _remote_path(p):
-    """还原 Git-Bash/MSYS 对远端路径的自动转换。
+    """还原 Git-Bash/MSYS 对**远端**路径参数的自动转换。
 
-    MSYS 会把 '/root/x' 改成 'C:/Program Files/Git/root/x'，需逆转回 '/root/x'。
-    常见于 push/pull 的远端路径参数。
+    Git-Bash 会把命令行参数中的类 Unix 路径改写，例如：
+      /root/x   → C:/Program Files/Git/root/x    （MSYS 根目录）
+      /tmp/x    → C:/Users/<user>/AppData/Local/Temp/x （MSYS 的 /tmp 是挂载点）
+    两者都需要还原成路由器上的真实路径，否则 SFTP 找不到文件。
     """
     if not p:
         return p
     q = p.replace("\\", "/")
     low = q.lower()
+
+    # ① MSYS 根： C:/Program Files/Git/... → /...
     for prefix in ("c:/program files/git/", "c:/program files (x86)/git/",
                    "c:/msys64/", "c:/cygwin64/", "c:/cygwin/"):
         if low.startswith(prefix):
             return "/" + q[len(prefix):]
+
+    # ② MSYS 的 /tmp 挂载： <WINDIR 临时目录>/x → /tmp/x
+    #    仅当路径确实位于系统临时目录下时还原。
+    for root in (os.environ.get("TEMP"), os.environ.get("TMP"),
+                 os.path.expanduser("~/AppData/Local/Temp"), "C:/Windows/Temp"):
+        if not root:
+            continue
+        r = root.replace("\\", "/").rstrip("/").lower()
+        if r and low.startswith(r + "/"):
+            return "/tmp/" + q[len(r) + 1:]
     return p
 
 
@@ -673,15 +688,20 @@ def cmd_push(args):
     remote = _remote_path(args.remote)
     if not os.path.isfile(local):
         die("本地文件不存在: %s" % args.local, 9)
+    local_size = os.path.getsize(local)
     cfg, _ = load_config()
     cli = connect(cfg)
     try:
         sftp = cli.open_sftp()
         sftp.put(local, remote)
+        # 上传后必须核字节数：SFTP 可能静默截断（实测过），
+        # 而 clash -t 对截断/不存在的文件照样报 successful —— 不核实就会断网。
+        remote_size = sftp.stat(remote).st_size
         sftp.close()
-        out("已上传: %s -> %s" % (local, remote))
-        rc, o, _ = run_remote(cli, "ls -la %s" % shlex.quote(remote))
-        out(o.rstrip())
+        if remote_size != local_size:
+            die("上传后字节数不一致：本地 %d，远端 %d（传输被截断？）"
+                % (local_size, remote_size), 11)
+        out("已上传: %s -> %s（%d 字节，已核实）" % (local, remote, local_size))
     finally:
         cli.close()
     return 0
@@ -720,6 +740,81 @@ def cmd_where(args):
     cp = config_path_existing()
     out("配置文件 : %s" % (cp or "(尚未配置)"))
     return 0
+
+
+def cmd_deploy_check(args):
+    """部署前检查（一级闸门的前置）—— 因为 clash -t 有盲区。
+
+    实测发现 clash -t 的局限：
+      · 文件不存在 → 照样报 "test is successful"（退出码 0）
+      · 50638 字节截断到 1000 → 照样报 successful
+      · 只有一行 'mixed-port: 7890' → 照样报 successful
+      它**只抓 YAML 语法错**，不查存在性/完整性/关键字段。
+
+    所以部署前必须自己做完整检查：
+      D1  远端文件存在且非空
+      D2  远端字节数与本地一致（防 SFTP 静默截断）
+      D3  关键段落齐全（proxies / proxy-groups / rules）
+
+    通过后才跑 clash -t（它能补充语法检查）。
+
+    退出码：0=通过 / 1=判负 / 2=环境不达标
+    """
+    local = _local_path(args.local) if args.local else None
+    remote = _remote_path(args.remote)
+    if local and not os.path.isfile(local):
+        die("本地文件不存在: %s" % args.local, 9)
+
+    cfg, _ = load_config()
+    cli = connect(cfg)
+    fails = []
+    try:
+        # D1 存在且非空
+        rc, o, _ = run_remote(
+            cli, "wc -c < %s 2>/dev/null" % shlex.quote(remote))
+        remote_size = 0
+        for line in o.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                remote_size = int(line)
+        if remote_size <= 0:
+            fails.append("D1 %s 不存在或为空" % remote)
+        else:
+            print("OK    D1 远端存在，%d 字节" % remote_size)
+
+        # D2 字节数一致
+        if local:
+            local_size = os.path.getsize(local)
+            if remote_size == local_size:
+                print("OK    D2 字节数一致（%d）" % local_size)
+            else:
+                fails.append("D2 字节数不一致：本地 %d / 远端 %d（传输被截断？）"
+                             % (local_size, remote_size))
+        else:
+            print("WARN  D2 未给 --local，跳过字节数比对（建议给）")
+
+        # D3 关键段落齐全
+        rc, o, _ = run_remote(
+            cli, "grep -cE '^(proxies|proxy-groups|rules):' %s 2>/dev/null"
+                 % shlex.quote(remote))
+        found = 0
+        for line in o.splitlines():
+            if line.strip().isdigit():
+                found = int(line.strip())
+        if found >= 2:
+            print("OK    D3 关键段落齐全（proxies/proxy-groups/rules 命中 %d）" % found)
+        else:
+            fails.append("D3 关键段落缺失（只命中 %d 个，似是被截断或被替换成了残片）" % found)
+
+        if fails:
+            for f in fails:
+                print("FAIL  " + f)
+            print("\n判负：不要用这份文件替换源配置（clash -t 可能误报通过）")
+            return 1
+        print("\n通过：可以跑 clash -t 做语法校验了")
+        return 0
+    finally:
+        cli.close()
 
 
 def cmd_safety(args):
@@ -874,6 +969,11 @@ def main():
     r.add_argument("command", nargs="+", help="要执行的命令（多个词会拼成一条；多命令用 ; 分隔）")
     r.add_argument("--timeout", type=int, default=None, help="超时秒数（默认不限）")
 
+    d = sub.add_parser("deploy-check",
+                       help="部署前完整性检查（clash -t 的前置：存在/字节数/关键段落）")
+    d.add_argument("--remote", required=True, help="远端待部署文件，如 /tmp/proxy.yaml")
+    d.add_argument("--local", help="本地源文件（给了就比对字节数）")
+
     s = sub.add_parser("safety", help="设备侧安全检查（改配置前：备份/目标一致性/核心状态）")
     s.add_argument("--config", help="即将修改的配置文件路径（路由器上）")
     s.add_argument("--timeout", type=int, default=60, help="每步超时秒数")
@@ -900,6 +1000,7 @@ def main():
         "doctor": cmd_doctor,
         "bootstrap": cmd_bootstrap,
         "where": cmd_where,
+        "deploy-check": cmd_deploy_check,
         "safety": cmd_safety,
         "setup": cmd_setup,
         "run": cmd_run,
