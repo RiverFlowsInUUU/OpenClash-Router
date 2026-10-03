@@ -7,12 +7,21 @@ OpenClash 自身的功能知识（选项含义、防火墙链、覆写语法）*
 
 ## 设计原则
 
-| 本技能负责 | 交给官方知识库 |
-|-----------|--------------|
+| 本技能负责 | 交给官方文档 |
+|-----------|------------|
 | 自动安装依赖（paramiko / cryptography） | 某个 UCI 选项是什么意思 |
 | 自动配置 SSH 免密连接 | 防火墙链怎么建 |
 | **安全修改配置的规程**（备份/校验/回滚） | 覆写模块语法 |
 | 环境层面的坑（apk 死锁、iStoreOS 组件依赖） | Mihomo 协议参数 |
+
+三条来自优秀 skill 的实践：
+
+1. **脚本当黑盒用** —— `oc.py` 有 600+ 行，`SKILL.md` 明确告诉模型
+   “别读源码，用 `--help`”。因此 `--help` 写得自解释（含示例）。
+2. **领域知识只引用不复制** —— 官方文档会更新，本地副本会过期。技能里给出
+   抓取命令，让模型当场拉最新的。
+3. **解释 instead of 命令** —— 说明“为什么要先校验再替换”（因为核心起不来用户就断网），
+   比堆一堆大写 MUST 更有效。
 
 > 📖 领域知识请看官方：[OpenClash 用户指南 SKILL.md](https://github.com/vernesong/OpenClash/blob/master/.github/skills/openclash-user-guide/SKILL.md)
 
@@ -97,12 +106,15 @@ $OC forget -y                   # 删除配置
 
 ```
 .
-├── SKILL.md                     # 技能说明（pi 读取）
-├── scripts/oc.py                # 管理工具
+├── SKILL.md                     # 技能说明（pi 读取，<500 行）
+├── scripts/oc.py                # 管理工具（设计为黑盒调用，用 --help 看用法）
 ├── .github/workflows/ci.yml     # CI
 ├── README.md
 └── LICENSE
 ```
+
+> `SKILL.md` 里的每一条命令都可以直接复制执行；`--help` 带完整示例，
+> 不需要阅读 `oc.py` 源码。
 
 ## 安全
 

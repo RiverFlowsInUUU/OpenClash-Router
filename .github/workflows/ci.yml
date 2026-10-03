@@ -68,6 +68,17 @@ jobs:
           print("OK  目录结构完整")
           PY
 
+      - name: SKILL.md 长度（渐进披露原则，建议 <500 行）
+        run: |
+          python - <<'PY'
+          import sys
+          n = sum(1 for _ in open("SKILL.md", encoding="utf-8"))
+          print(f"SKILL.md 行数: {n}")
+          if n > 500:
+              sys.exit(f"过长（{n} > 500），应考虑外置到 references/")
+          print("OK  在建议长度内")
+          PY
+
       - name: Python 语法检查
         run: python -m py_compile scripts/oc.py && echo "OK  scripts/oc.py 语法正确"
 
@@ -77,6 +88,36 @@ jobs:
           python scripts/oc.py --help >/dev/null
           python scripts/oc.py doctor || true   # 未配置属预期，不应崩
           echo "OK  CLI 可运行"
+
+      - name: SKILL.md 引用的子命令都存在
+        run: |
+          python - <<'PY'
+          import re, pathlib, subprocess, sys
+          text = pathlib.Path("SKILL.md").read_text(encoding="utf-8")
+          if "oc.py" not in text:
+              sys.exit("SKILL.md 未提及 oc.py")
+
+          known_cmds = {"doctor", "bootstrap", "setup", "probe", "run",
+                        "push", "pull", "show-config", "forget"}
+
+          # 捕获两种引用形式:  oc.py <cmd>   以及   $OC <cmd>
+          used = set(re.findall(r'oc\.py"?\s+([a-z][a-z-]+)', text))
+          used |= set(re.findall(r'\$OC\s+([a-z][a-z-]+)', text))
+          used -= {"scripts"}
+
+          unknown = sorted(c for c in used if c not in known_cmds)
+          if unknown:
+              sys.exit("SKILL.md 引用了不存在的子命令: " + ", ".join(unknown))
+
+          # 同时确认 oc.py --help 不报错
+          r = subprocess.run(
+              [sys.executable, "scripts/oc.py", "--help"],
+              capture_output=True, text=True, encoding="utf-8", errors="replace"
+          )
+          if r.returncode != 0:
+              sys.exit("--help 返回非 0")
+          print(f"OK  引用的子命令均存在: {', '.join(sorted(used))}")
+          PY
 
       - name: 检查是否误提交了大体积/过期内容
         run: |

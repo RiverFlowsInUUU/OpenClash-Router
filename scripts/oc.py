@@ -647,43 +647,72 @@ def cmd_forget(args):
 
 # ---------------------------------------------------------------- main
 def main():
+    epilog = """\
+示例:
+  # 环境自检（第一条命令总是它）
+  python oc.py doctor
+
+  # 首次配置连接（交互式，密码不经过 shell 历史）
+  python oc.py setup
+  # 非交互式
+  python oc.py setup --host 192.168.1.1 --user root --password 'xxx'
+  # 用已有私钥
+  python oc.py setup --host 192.168.1.1 --key ~/.ssh/id_ed25519
+
+  # 看 OpenClash 状态
+  python oc.py probe
+
+  # 执行远端命令（可多条，用 ; 分隔）
+  python oc.py run "uci show openclash | head"
+  python oc.py run "pidof clash; uptime"
+
+  # 上传 / 下载
+  python oc.py push ./proxy.yaml /tmp/proxy.yaml
+  python oc.py pull /etc/openclash/config/proxy.yaml ./proxy.yaml
+
+  改配置流程（重要）: 先用 clash -t 校验再替换，详见 SKILL.md
+  python oc.py run "/etc/openclash/clash -t -d /etc/openclash -f /tmp/new.yaml"
+
+路径无需处理: 脚本自动兼容 Windows + Git-Bash 的路径转换。
+环境变量: OC_CONFIG 指定配置文件; OC_NO_AUTO_INSTALL=1 禁用依赖自动安装。
+"""
     ap = argparse.ArgumentParser(
         prog="oc.py",
-        description="OpenWrt / OpenClash 管理入口",
+        description="OpenWrt / OpenClash 管理入口（通过 SSH）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog=epilog,
     )
-    sub = ap.add_subparsers(dest="cmd")
+    sub = ap.add_subparsers(dest="cmd", metavar="<命令>")
 
-    sub.add_parser("doctor", help="检查环境与配置状态")
-    sub.add_parser("bootstrap", help="安装/检查本地依赖")
-    sub.add_parser("probe", help="一览 OpenClash 运行状态")
+    sub.add_parser("doctor", help="环境自检（依赖 + 连接 + 远端环境）——每次会话第一条命令")
+    sub.add_parser("bootstrap", help="安装/检查本地依赖 (paramiko, cryptography)")
+    sub.add_parser("probe", help="一览 OpenClash 运行状态（系统/内存/模式/端口/配置/防火墙/日志）")
 
-    s = sub.add_parser("setup", help="配置连接 (生成并部署密钥)")
-    s.add_argument("--host")
-    s.add_argument("--port", default=None)
-    s.add_argument("--user", default=None)
-    s.add_argument("--password")
-    s.add_argument("--password-file")
+    s = sub.add_parser("setup", help="配置连接（生成并部署密钥，之后免密）")
+    s.add_argument("--host", help="路由器 IP，如 192.168.1.1")
+    s.add_argument("--port", help="SSH 端口，默认 22")
+    s.add_argument("--user", help="SSH 用户名，OpenWrt 通常为 root")
+    s.add_argument("--password", help="SSH 密码（仅首次部署公钥用；建议改用交互式）")
+    s.add_argument("--password-file", help="从文件读密码（避免进 shell 历史）")
     s.add_argument("--key", help="使用已有私钥，跳过密码流程")
-    s.add_argument("--no-key", action="store_true", help="不生成密钥，保存明文密码")
+    s.add_argument("--no-key", action="store_true", help="不生成密钥，保存明文密码（不推荐）")
 
-    r = sub.add_parser("run", help="执行远端命令")
-    r.add_argument("command", nargs="+")
-    r.add_argument("--timeout", type=int, default=None)
+    r = sub.add_parser("run", help="在路由器执行命令（多条用 ; 分隔）")
+    r.add_argument("command", nargs="+", help="要执行的命令")
+    r.add_argument("--timeout", type=int, default=None, help="超时秒数（默认不限）")
 
-    pu = sub.add_parser("push", help="上传文件")
-    pu.add_argument("local")
-    pu.add_argument("remote")
+    pu = sub.add_parser("push", help="上传本地文件到路由器")
+    pu.add_argument("local", help="本地文件路径")
+    pu.add_argument("remote", help="远端目标路径")
 
-    pl = sub.add_parser("pull", help="下载文件")
-    pl.add_argument("remote")
-    pl.add_argument("local")
+    pl = sub.add_parser("pull", help="从路由器下载文件到本地")
+    pl.add_argument("remote", help="远端文件路径")
+    pl.add_argument("local", help="本地目标路径")
 
-    sub.add_parser("show-config", help="显示配置(隐藏密码)")
+    sub.add_parser("show-config", help="显示当前连接配置（密码已隐藏）")
 
-    f = sub.add_parser("forget", help="删除已保存配置")
-    f.add_argument("-y", "--yes", action="store_true")
+    f = sub.add_parser("forget", help="删除已保存的连接配置")
+    f.add_argument("-y", "--yes", action="store_true", help="不询问直接删除")
 
     args = ap.parse_args()
     if not args.cmd:
