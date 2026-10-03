@@ -5,6 +5,7 @@ oc.py — OpenWrt / OpenClash 管理入口 (通用技能)
 
 子命令:
   doctor              检查环境与配置状态，告诉你还缺什么
+  bootstrap           安装/检查本地依赖 (paramiko / cryptography)
   setup               配置连接 (生成密钥 -> 部署公钥 -> 验证 -> 保存)
   run "<cmd>"         在路由器执行命令 (多条用 ; 或换行)
   probe               一览 OpenClash 运行状态 (只读)
@@ -35,13 +36,55 @@ import json
 import os
 import posixpath
 import shlex
+import subprocess
 import sys
 import stat
 
-try:
-    import paramiko
-except ImportError:
-    sys.stderr.write("缺少 paramiko。请先运行:  python -m pip install paramiko\n")
+
+# ---------------------------------------------------------------- 依赖自举
+# 本脚本只需要 paramiko。缺失时尝试自动安装；失败则给出可复制的安装命令。
+_AUTO_INSTALLED = {}
+
+
+def _ensure_dep(module, package=None):
+    package = package or module
+    try:
+        return __import__(module)
+    except ImportError:
+        pass
+    if os.environ.get("OC_NO_AUTO_INSTALL"):
+        return None
+    cmds = [
+        [sys.executable, "-m", "pip", "install", "--quiet", package],
+        [sys.executable, "-m", "pip", "install", "--user", "--quiet", package],
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", "--quiet", package],
+    ]
+    for c in cmds:
+        try:
+            r = subprocess.run(c, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+        except Exception:
+            continue
+        if r.returncode != 0:
+            continue
+        try:
+            import importlib
+            importlib.invalidate_caches()
+            mod = __import__(module)
+            _AUTO_INSTALLED[module] = True
+            return mod
+        except ImportError:
+            continue
+    return None
+
+
+paramiko = _ensure_dep("paramiko")
+if paramiko is None:
+    sys.stderr.write(
+        "缺少 paramiko（自动安装失败）。请手动执行以下任一命令后重试：\n"
+        "  python -m pip install paramiko\n"
+        "  python -m pip install --user paramiko\n"
+        "  python -m pip install --break-system-packages paramiko   # 系统 Python (PEP 668)\n"
+    )
     sys.exit(3)
 
 # Windows 控制台默认 GBK，强制 UTF-8 以正确显示中文/emoji
@@ -118,7 +161,12 @@ def save_config(cfg):
 
 # ---------------------------------------------------------------- 密钥
 def generate_key(path=KEY_PATH):
-    """生成 ed25519 密钥对，返回 (私钥路径, 公钥字符串)"""
+    """生成 ed25519 密钥对，返回 (私钥路径, 公钥字符串)。
+
+    cryptography 缺失时先尝试自动安装；仍不可用则返回 (None, None)，
+    调用方会回退到密码模式。
+    """
+    _ensure_dep("cryptography")
     try:
         from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives import serialization
@@ -195,6 +243,30 @@ PREREQS_REMOTE = [
 ]
 
 
+def cmd_bootstrap(args):
+    """显式安装/检查本地依赖，并报告结果。"""
+    out("=" * 62)
+    out("OpenClash 管理技能 — 本地依赖")
+    out("=" * 62)
+    ok = True
+    for mod, pkg in (("paramiko", "paramiko"), ("cryptography", "cryptography")):
+        m = _ensure_dep(mod, pkg)
+        if m is None:
+            out("  [x] %-14s 安装失败" % mod)
+            ok = False
+        else:
+            ver = getattr(m, "__version__", "?")
+            tag = "本次安装" if _AUTO_INSTALLED.get(mod) else "已可用"
+            out("  [v] %-14s %s  (%s)" % (mod, ver, tag))
+    out()
+    if ok:
+        out("依赖就绪。下一步:  python %s setup" % os.path.basename(__file__))
+    else:
+        out("部分依赖缺失，请手动安装：")
+        out("  python -m pip install paramiko cryptography")
+    return 0 if ok else 3
+
+
 def cmd_doctor(args):
     out("=" * 62)
     out("OpenClash 管理技能 — 环境自检")
@@ -203,12 +275,14 @@ def cmd_doctor(args):
     # 1. 本地依赖
     out("\n[1/3] 本地依赖")
     out("  python      : %s" % sys.version.split()[0])
-    out("  paramiko    : %s" % paramiko.__version__)
+    out("  paramiko    : %s%s" % (paramiko.__version__, "  (已自动安装)" if _AUTO_INSTALLED.get("paramiko") else ""))
     try:
         import cryptography
-        out("  cryptography: %s" % cryptography.__version__)
+        out("  cryptography: %s%s" % (cryptography.__version__, "  (已自动安装)" if _AUTO_INSTALLED.get("cryptography") else ""))
+        _has_crypto = True
     except ImportError:
-        out("  cryptography: 缺失 (生成密钥需要)")
+        out("  cryptography: 缺失  (仅 setup 生成密钥时需要；可 pip install cryptography)")
+        _has_crypto = False
 
     # 2. 配置
     out("\n[2/3] 连接配置")
@@ -582,6 +656,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("doctor", help="检查环境与配置状态")
+    sub.add_parser("bootstrap", help="安装/检查本地依赖")
     sub.add_parser("probe", help="一览 OpenClash 运行状态")
 
     s = sub.add_parser("setup", help="配置连接 (生成并部署密钥)")
@@ -617,6 +692,7 @@ def main():
 
     handlers = {
         "doctor": cmd_doctor,
+        "bootstrap": cmd_bootstrap,
         "setup": cmd_setup,
         "run": cmd_run,
         "probe": cmd_probe,

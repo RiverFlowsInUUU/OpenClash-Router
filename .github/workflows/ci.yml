@@ -61,7 +61,7 @@ jobs:
         run: |
           python - <<'PY'
           import os, sys
-          required = ["SKILL.md", "scripts/oc.py", "references/openclash-guide.md"]
+          required = ["SKILL.md", "scripts/oc.py", "README.md", "LICENSE"]
           missing = [f for f in required if not os.path.isfile(f)]
           if missing:
               sys.exit("缺少必需文件: " + ", ".join(missing))
@@ -77,6 +77,25 @@ jobs:
           python scripts/oc.py --help >/dev/null
           python scripts/oc.py doctor || true   # 未配置属预期，不应崩
           echo "OK  CLI 可运行"
+
+      - name: 检查是否误提交了大体积/过期内容
+        run: |
+          python - <<'PY'
+          import os, sys
+          # 不应对官方知识库做本地副本（会过期，应引用官方 URL）
+          banned_paths = ["references/openclash-guide.md"]
+          found = [p for p in banned_paths if os.path.exists(p)]
+          if found:
+              sys.exit("不应内置官方知识副本（改为引用官方 URL）: " + ", ".join(found))
+          # 单文件不超过 200KB
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d != ".git"]
+              for f in files:
+                  p = os.path.join(root, f)
+                  if os.path.getsize(p) > 200 * 1024:
+                      sys.exit(f"文件过大（>200KB）: {p}")
+          print("OK  无过期内容/超大文件")
+          PY
 
       - name: 敏感文件泄露检查
         run: |
