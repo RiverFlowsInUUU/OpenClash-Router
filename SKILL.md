@@ -154,22 +154,58 @@ OpenWrt 官方对 `reload` 的通用语义是「重载配置（通常发 SIGHUP�
 ## 3 · 领域知识查官方，禁止凭记忆
 
 配置字段编错会**直接把用户的网络搞挂**。凡涉及「某选项什么意思」「为什么这个
-规则不生效」「这个报错啥原因」，**先查官方知识库**：
+规则不生效」「这个报错啥原因」，**先查官方，不要凭记忆作答**。
+
+**按问题层次选源**（越靠后越底层、越权威，也越难读）：
+
+| 问题属哪个层 | 查哪里 | 为什么是这个 |
+|------------|--------|------------|
+| **① OpenClash 插件层**<br>UCI/LuCI 选项、防火墙链、覆写模块语法、订阅处理 | [OpenClash 官方知识库](https://github.com/vernesong/OpenClash/blob/master/.github/skills/openclash-user-guide/SKILL.md) | 它讲的是「插件怎么把 UI 选项变成 Mihomo 配置」 |
+| **② Mihomo 配置层**<br>字段含义/取值、DNS 策略、分流规则、各代理协议参数 | [Mihomo Wiki](https://wiki.metacubex.one/config/) · [Meta-Docs 仓库](https://github.com/MetaCubeX/Meta-Docs/tree/main/docs/config) | 配置字段的**权威定义**（Meta-Docs 按 config/dns、config/proxies、config/rules… 分类） |
+| **③ 内核实底层**<br>「为什么这个字段不生效」、行为细节、边界 | [mihomo 内核源码](https://github.com/MetaCubeX/mihomo/tree/Alpha) | 文档没写清的，源码是唯一真相（见下方定位表） |
+| **④ 已知问题/报错** | [OpenClash Issues](https://github.com/vernesong/OpenClash/issues)（插件侧）· [Mihomo Issues](https://github.com/MetaCubeX/mihomo/issues)（内核侧） | 先搜再问；优先看作者/维护者回复与高赞方案 |
+
+> ⚠️ 先判断问题在哪一层 —— 把「插件层」的问题拿去查内核文档、
+> 或把「内核行为」问题当成插件 bug，都会绕远路。
+
+### 怎么取用（可照抄）
 
 ```bash
+# ① 插件层：整份抓下来 grep（比网页里翻快）
 curl -sL -o /tmp/oc-guide.md \
   https://raw.githubusercontent.com/vernesong/OpenClash/master/.github/skills/openclash-user-guide/SKILL.md
-grep -n "关键词" /tmp/oc-guide.md       # 定位
-sed -n '120,160p' /tmp/oc-guide.md      # 读上下文
+grep -n "关键词" /tmp/oc-guide.md && sed -n '120,160p' /tmp/oc-guide.md
+
+# ② 配置层：Meta-Docs 是纯 markdown，可直接抓单个字段页
+curl -sL -o /tmp/md.md \
+  https://raw.githubusercontent.com/MetaCubeX/Meta-Docs/main/docs/config/dns/index.md
+grep -n "fake-ip\|nameserver-policy" /tmp/md.md
+
+# ② 配置层：完整配置示例（不知道某段该怎么写时，看这个比看字段表快）
+curl -sL -o /tmp/mihomo-config.yaml \
+  https://raw.githubusercontent.com/MetaCubeX/mihomo/Alpha/docs/config.yaml
+
+# ③ 内核层：在源码里定位实现（比读全仓快）
+#    用 GitHub 代码搜索： https://github.com/search?q=repo%3AMetaCubeX%2Fmihomo+关键词&type=code
 ```
 
-必须查：UCI/LuCI 选项含义 · 防火墙链 · 覆写模块语法 · DNS 配置 ·
-分流规则与 provider · 报错含义 · 订阅处理。
+### ③ 内核实底层 · 关键词 → 源码位置
 
-其他：Mihomo 字段 → https://wiki.metacubex.one/config/ ；
-报错搜 [OpenClash Issues](https://github.com/vernesong/OpenClash/issues) /
-[Mihomo Issues](https://github.com/MetaCubeX/mihomo/issues)。
-**查不到就说查不到，禁止编造。**
+问题渗到「文档没说清、字段不生效」时，去源码找答案。常见入口：
+
+| 想查什么 | 去哪个目录 |
+|---------|-----------|
+| 配置解析/校验（字段为何报错） | `config/` |
+| 规则引擎（DOMAIN/GEOIP/RULE-SET 如何匹配） | `rules/` · `adapter/` |
+| DNS（fake-ip、nameserver-policy、fallback 行为） | `dns/` · `component/resolver/` |
+| 入口/TUN/透明代理 | `listener/`（含 `sing_tun/`） |
+| 代理协议实现（vless/hysteria/tuic…） | `adapter/outbound/` |
+| 完整配置示例 | [`docs/config.yaml`](https://github.com/MetaCubeX/mihomo/blob/Alpha/docs/config.yaml) |
+
+> 注：`MetaCubeX/mihomo` 的仓库 description 字面显示成别的东西（实测是无关内容），
+> **但仓库本体就是内核**（分支用 `Alpha`/`Meta`，主题是 Go）。别被 description 劝退。
+
+**查不到就说查不到**，把链接给用户自己看 —— 禁止编造字段名、选项值、错误解释。
 
 ---
 
