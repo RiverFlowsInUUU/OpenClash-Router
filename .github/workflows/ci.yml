@@ -154,6 +154,29 @@ jobs:
               print("SKIP  SKILL.md 未声称行数")
           PY
 
+      - name: 退出码语义（仅测不需真实路由器的分支）
+        run: |
+          set +e
+          fail=0
+          check() {  # 描述 期望码 命令...
+            desc="$1"; want="$2"; shift 2
+            "$@" >/dev/null 2>&1
+            got=$?
+            if [ "$got" != "$want" ]; then
+              echo "::error::$desc: 期望退出码 $want，实际 $got"
+              fail=1
+            else
+              echo "OK  $desc (exit=$got)"
+            fi
+          }
+          # 这些在连接前就会失败，无需真实路由器，也不需已配置
+          check "run 空命令"           2  python scripts/oc.py run ""
+          check "push 本地文件不存在"   9  python scripts/oc.py push /nonexistent-xyz /root/ci-xyz
+          # OC_CONFIG 显式指向不存在的文件 → 应报 5（不静默回退）
+          check "OC_CONFIG 指向不存在"  5  env OC_CONFIG=/tmp/nope-ci.json python scripts/oc.py doctor
+          rm -f /tmp/nope-ci.json
+          exit $fail
+
       - name: 敏感文件泄露检查
         run: |
           python - <<'PY'

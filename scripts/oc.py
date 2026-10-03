@@ -97,11 +97,14 @@ for _s in (sys.stdout, sys.stderr):
 
 # ---------------------------------------------------------------- 常量
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_CANDIDATES = []
-if os.environ.get("OC_CONFIG"):
-    CONFIG_CANDIDATES.append(os.environ["OC_CONFIG"])
-CONFIG_CANDIDATES.append(os.path.join(os.path.expanduser("~"), ".config", "openclash-mgmt", "config.json"))
-CONFIG_CANDIDATES.append(os.path.join(SKILL_DIR, "config.json"))
+
+# 默认候选位置（不含 OC_CONFIG 显式指定）
+_DEFAULT_CANDIDATES = [
+    os.path.join(os.path.expanduser("~"), ".config", "openclash-mgmt", "config.json"),
+    os.path.join(SKILL_DIR, "config.json"),
+]
+# 展示用：把显式指定的位置放在最前
+CONFIG_CANDIDATES = ([os.environ["OC_CONFIG"]] if os.environ.get("OC_CONFIG") else []) + _DEFAULT_CANDIDATES
 
 KEY_DIR = os.path.join(os.path.expanduser("~"), ".config", "openclash-mgmt")
 KEY_PATH = os.environ.get("OC_KEY_PATH") or os.path.join(KEY_DIR, "id_ed25519")
@@ -124,11 +127,19 @@ def config_path_for_write():
     """优先级最高且可写的位置"""
     if os.environ.get("OC_CONFIG"):
         return os.environ["OC_CONFIG"]
-    return CONFIG_CANDIDATES[1]
+    return _DEFAULT_CANDIDATES[0]
 
 
 def config_path_existing():
-    for p in CONFIG_CANDIDATES:
+    # OC_CONFIG 是显式指定：若指定了就只认它（不存在则报错），
+    # 避免静默回退到别的配置 —— 那会让“我明明指定了配置”变成谎言。
+    explicit = os.environ.get("OC_CONFIG")
+    if explicit:
+        if os.path.isfile(explicit):
+            return explicit
+        die("OC_CONFIG 指定的配置文件不存在: %s" % explicit, 5)
+    # 未显式指定：按默认顺序找第一个存在的
+    for p in _DEFAULT_CANDIDATES:
         if p and os.path.isfile(p):
             return p
     return None
@@ -227,11 +238,24 @@ def connect(cfg, prefer_key=None, timeout=20):
 
 
 def run_remote(cli, command, timeout=None):
-    stdin, stdout, stderr = cli.exec_command(command, timeout=timeout)
-    o = stdout.read().decode("utf-8", "replace")
-    e = stderr.read().decode("utf-8", "replace")
-    rc = stdout.channel.recv_exit_status()
-    return rc, o, e
+    """执行远端命令。返回 (退出码, stdout, stderr)。
+
+    超时或通道异常时返回非 0 退出码，而不是抛异常 —— 调用方（尤其是
+    agent）需要的是可读的失败信息，不是 Python traceback。
+    """
+    try:
+        stdin, stdout, stderr = cli.exec_command(command, timeout=timeout)
+        o = stdout.read().decode("utf-8", "replace")
+        e = stderr.read().decode("utf-8", "replace")
+        rc = stdout.channel.recv_exit_status()
+        return rc, o, e
+    except Exception as exc:
+        name = type(exc).__name__
+        if "Timeout" in name or "timeout" in str(exc).lower():
+            msg = "命令超时（%s 秒）: %s" % (timeout, command)
+        else:
+            msg = "命令执行失败（%s）: %s" % (name, exc)
+        return 124, "", msg
 
 
 # ---------------------------------------------------------------- doctor
@@ -477,24 +501,30 @@ def cmd_setup(args):
 
 # ---------------------------------------------------------------- run
 def cmd_run(args):
+    # nargs="+" 时 argparse 给出 list；把它们拼回单条命令，
+    # 因为用户写 `run echo hello` 期待的是执行 `echo hello`，
+    # 而不是把 hello 当成第二条命令。多命令请用 "cmd1; cmd2"。
+    raw = args.command if isinstance(args.command, list) else [args.command]
+    command = " ".join(raw).strip()
+    if not command:
+        die("没有命令可执行", 2)
     cfg, _ = load_config()
-    cmds = args.command if isinstance(args.command, list) else [args.command]
     cli = connect(cfg)
     try:
-        for c in cmds:
-            c = _remote_path(c)
-            out("$ " + c)
-            rc, o, e = run_remote(cli, c, timeout=args.timeout)
-            if o:
-                sys.stdout.write(o if o.endswith("\n") else o + "\n")
-            if e.strip():
-                sys.stderr.write("[stderr] " + (e if e.endswith("\n") else e + "\n"))
-            if rc != 0:
-                out("[exit=%d]" % rc)
-            out()
+        command = _remote_path(command)
+        out("$ " + command)
+        rc, o, e = run_remote(cli, command, timeout=args.timeout)
+        if o:
+            sys.stdout.write(o if o.endswith("\n") else o + "\n")
+        if e.strip():
+            sys.stderr.write("[stderr] " + (e if e.endswith("\n") else e + "\n"))
+        if rc != 0:
+            out("[exit=%d]" % rc)
+        out()
+        # 透传远端退出码，让调用方（脚本/CI）能感知失败
+        return rc if 0 <= rc <= 255 else 1
     finally:
         cli.close()
-    return 0
 
 
 # ---------------------------------------------------------------- probe
@@ -608,8 +638,9 @@ def _local_path(p):
 
 def _remote_path(p):
     """还原 Git-Bash/MSYS 对远端路径的自动转换。
+
     MSYS 会把 '/root/x' 改成 'C:/Program Files/Git/root/x'，需逆转回 '/root/x'。
-    只对纯路径生效，含空格的命令不做改写。
+    常见于 push/pull 的远端路径参数。
     """
     if not p:
         return p
@@ -618,21 +649,16 @@ def _remote_path(p):
     for prefix in ("c:/program files/git/", "c:/program files (x86)/git/",
                    "c:/msys64/", "c:/cygwin64/", "c:/cygwin/"):
         if low.startswith(prefix):
-            tail = q[len(prefix):]
-            # 只有看起来像远端路径时才还原（避免吞掉真实命令）
-            if tail.startswith(("root/", "etc/", "tmp/", "usr/", "var/", "opt/",
-                                "home/", "mnt/", "www/", "lib/", "bin/", "sbin/",
-                                "proc/", "sys/", "dev/")):
-                return "/" + tail
+            return "/" + q[len(prefix):]
     return p
 
 
 def cmd_push(args):
-    cfg, _ = load_config()
     local = _local_path(args.local)
     remote = _remote_path(args.remote)
     if not os.path.isfile(local):
         die("本地文件不存在: %s" % args.local, 9)
+    cfg, _ = load_config()
     cli = connect(cfg)
     try:
         sftp = cli.open_sftp()
@@ -659,8 +685,12 @@ def cmd_pull(args):
         if d:
             os.makedirs(d, exist_ok=True)
         sftp = cli.open_sftp()
-        sftp.get(remote, local)
-        sftp.close()
+        try:
+            sftp.get(remote, local)
+        except IOError as exc:
+            die("下载失败：远端文件不存在或不可读 → %s（%s）" % (remote, exc), 10)
+        finally:
+            sftp.close()
         out("已下载: %s -> %s (%d 字节)" % (remote, local, os.path.getsize(local)))
     finally:
         cli.close()
@@ -756,7 +786,7 @@ def main():
     s.add_argument("--no-key", action="store_true", help="不生成密钥，保存明文密码（不推荐）")
 
     r = sub.add_parser("run", help="在路由器执行命令（多条用 ; 分隔）")
-    r.add_argument("command", nargs="+", help="要执行的命令")
+    r.add_argument("command", nargs="+", help="要执行的命令（多个词会拼成一条；多命令用 ; 分隔）")
     r.add_argument("--timeout", type=int, default=None, help="超时秒数（默认不限）")
 
     pu = sub.add_parser("push", help="上传本地文件到路由器")
