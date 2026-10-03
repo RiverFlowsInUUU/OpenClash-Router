@@ -1,0 +1,12 @@
+# 本地连接配置（绝不上传）
+config.json
+.oc_creds.json
+.oc_creds.json.example
+*.bak
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store

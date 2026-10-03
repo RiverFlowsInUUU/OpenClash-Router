@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+oc.py — OpenWrt / OpenClash 管理入口 (通用技能)
+
+子命令:
+  doctor              检查环境与配置状态，告诉你还缺什么
+  setup               配置连接 (生成密钥 -> 部署公钥 -> 验证 -> 保存)
+  run "<cmd>"         在路由器执行命令 (多条用 ; 或换行)
+  probe               一览 OpenClash 运行状态 (只读)
+  push <本地> <远端>   上传文件
+  pull <远端> <本地>   下载文件
+  show-config         显示当前配置 (隐藏密码)
+  forget              删除已保存的配置
+
+配置位置 (按优先级):
+  $OC_CONFIG -> ~/.config/openclash-mgmt/config.json -> <技能目录>/config.json
+
+setup 用法:
+  # 交互式 (推荐人工执行)
+  python oc.py setup
+
+  # 非交互式
+  python oc.py setup --host 192.168.1.1 --user root --password 'xxx'
+  python oc.py setup --host 192.168.1.1 --user root --password-file /tmp/pw
+  OC_PASSWORD=xxx python oc.py setup --host 192.168.1.1
+  python oc.py setup --host 192.168.1.1 --key ~/.ssh/id_ed25519   # 已有私钥
+
+  # 不生成密钥，直接用密码保存 (最省事，但存明文)
+  python oc.py setup --host 192.168.1.1 --password 'xxx' --no-key
+"""
+import argparse
+import getpass
+import json
+import os
+import posixpath
+import shlex
+import sys
+import stat
+
+try:
+    import paramiko
+except ImportError:
+    sys.stderr.write("缺少 paramiko。请先运行:  python -m pip install paramiko\n")
+    sys.exit(3)
+
+# Windows 控制台默认 GBK，强制 UTF-8 以正确显示中文/emoji
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# ---------------------------------------------------------------- 常量
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_CANDIDATES = []
+if os.environ.get("OC_CONFIG"):
+    CONFIG_CANDIDATES.append(os.environ["OC_CONFIG"])
+CONFIG_CANDIDATES.append(os.path.join(os.path.expanduser("~"), ".config", "openclash-mgmt", "config.json"))
+CONFIG_CANDIDATES.append(os.path.join(SKILL_DIR, "config.json"))
+
+KEY_DIR = os.path.join(os.path.expanduser("~"), ".config", "openclash-mgmt")
+KEY_PATH = os.environ.get("OC_KEY_PATH") or os.path.join(KEY_DIR, "id_ed25519")
+
+REMOTE_AUTHORIZED = "/etc/dropbear/authorized_keys"
+
+
+def out(msg=""):
+    sys.stdout.write(str(msg) + "\n")
+    sys.stdout.flush()
+
+
+def die(msg, code=2):
+    sys.stderr.write("ERROR: " + str(msg) + "\n")
+    sys.exit(code)
+
+
+# ---------------------------------------------------------------- 配置读写
+def config_path_for_write():
+    """优先级最高且可写的位置"""
+    if os.environ.get("OC_CONFIG"):
+        return os.environ["OC_CONFIG"]
+    return CONFIG_CANDIDATES[1]
+
+
+def config_path_existing():
+    for p in CONFIG_CANDIDATES:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def load_config(required=True):
+    p = config_path_existing()
+    if not p:
+        if required:
+            die("尚未配置。请先运行:  python oc.py setup\n或先运行 python oc.py doctor 查看状态", 4)
+        return {}, None
+    try:
+        with open(p, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        die("配置文件损坏 %s: %s" % (p, e), 5)
+    return cfg, p
+
+
+def save_config(cfg):
+    p = config_path_for_write()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)   # 600
+    except Exception:
+        pass
+    return p
+
+
+# ---------------------------------------------------------------- 密钥
+def generate_key(path=KEY_PATH):
+    """生成 ed25519 密钥对，返回 (私钥路径, 公钥字符串)"""
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        return None, None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    k = ed25519.Ed25519PrivateKey.generate()
+    priv = k.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    )
+    with open(path, "wb") as f:
+        f.write(priv)
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        pass
+    pub = k.public_key().public_bytes(
+        serialization.Encoding.OpenSSH,
+        serialization.PublicFormat.OpenSSH,
+    ).decode()
+    return path, pub + " openclash-mgmt"
+
+
+# ---------------------------------------------------------------- SSH
+def connect(cfg, prefer_key=None, timeout=20):
+    host = cfg.get("host")
+    if not host:
+        die("配置缺少 host", 4)
+    port = int(cfg.get("port") or 22)
+    user = cfg.get("user") or "root"
+
+    keyfile = prefer_key if prefer_key is not None else cfg.get("key")
+    password = cfg.get("password") or None
+
+    cli = paramiko.SSHClient()
+    cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kw = dict(hostname=host, port=port, username=user, timeout=timeout,
+              banner_timeout=timeout, auth_timeout=timeout,
+              allow_agent=False, look_for_keys=False)
+    if keyfile and os.path.isfile(os.path.expanduser(keyfile)):
+        kw["key_filename"] = os.path.expanduser(keyfile)
+        if cfg.get("key_passphrase"):
+            kw["passphrase"] = cfg["key_passphrase"]
+    elif password:
+        kw["password"] = password
+    else:
+        die("配置里既没有可用私钥也没有密码", 4)
+    try:
+        cli.connect(**kw)
+    except paramiko.AuthenticationException:
+        die("认证失败：用户名/密码/密钥 不正确", 6)
+    except Exception as e:
+        die("连接 %s:%s 失败: %s" % (host, port, e), 7)
+    return cli
+
+
+def run_remote(cli, command, timeout=None):
+    stdin, stdout, stderr = cli.exec_command(command, timeout=timeout)
+    o = stdout.read().decode("utf-8", "replace")
+    e = stderr.read().decode("utf-8", "replace")
+    rc = stdout.channel.recv_exit_status()
+    return rc, o, e
+
+
+# ---------------------------------------------------------------- doctor
+PREREQS_REMOTE = [
+    ("OpenClash 插件", "ls /etc/init.d/openclash"),
+    ("UCI 配置", "uci show openclash 2>/dev/null | head -1"),
+    ("核心二进制", "ls /etc/openclash/core/ 2>/dev/null | head -1"),
+    ("ruby", "command -v ruby"),
+    ("dnsmasq-full", "dnsmasq --version 2>/dev/null | head -1"),
+]
+
+
+def cmd_doctor(args):
+    out("=" * 62)
+    out("OpenClash 管理技能 — 环境自检")
+    out("=" * 62)
+
+    # 1. 本地依赖
+    out("\n[1/3] 本地依赖")
+    out("  python      : %s" % sys.version.split()[0])
+    out("  paramiko    : %s" % paramiko.__version__)
+    try:
+        import cryptography
+        out("  cryptography: %s" % cryptography.__version__)
+    except ImportError:
+        out("  cryptography: 缺失 (生成密钥需要)")
+
+    # 2. 配置
+    out("\n[2/3] 连接配置")
+    cfg, path = load_config(required=False)
+    if not path:
+        out("  状态: 尚未配置  ← 需要运行 setup")
+        out("  运行:  python %s setup" % os.path.basename(__file__))
+        out("\n  需要准备:")
+        out("    - 路由器 IP (LAN 地址)")
+        out("    - SSH 用户名 (OpenWrt 通常是 root)")
+        out("    - SSH 密码 (或现有私钥路径)")
+        return 4
+    out("  配置文件: %s" % path)
+    out("  主机    : %s:%s" % (cfg.get("host"), cfg.get("port") or 22))
+    out("  用户    : %s" % (cfg.get("user") or "root"))
+    out("  认证    : %s" % ("密钥" if cfg.get("key") else ("密码" if cfg.get("password") else "无!")))
+
+    # 3. 连通性 + 远端环境
+    out("\n[3/3] 连通性与远端环境")
+    try:
+        cli = connect(cfg)
+    except SystemExit as e:
+        out("  连接失败 (见上方错误)")
+        return e.code if isinstance(e.code, int) else 7
+    try:
+        rc, o, e = run_remote(cli, "cat /proc/sys/kernel/hostname; "
+                                   "cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_ID; "
+                                   "uname -m; command -v fw4 >/dev/null && echo fw4 || echo fw3")
+        out("  主机名  : %s" % o.strip().replace("\n", " | "))
+        for name, c in PREREQS_REMOTE:
+            rc, o2, _ = run_remote(cli, c)
+            mark = "OK " if rc == 0 and o2.strip() else "!! "
+            out("  %s %s" % (mark, name))
+        rc, o3, _ = run_remote(cli, "pidof clash")
+        out("  clash 进程: %s" % ("运行中 PID " + o3.strip() if o3.strip() else "未运行"))
+    finally:
+        cli.close()
+
+    out("\n" + "-" * 62)
+    out("自检通过，可以开始使用。")
+    out('示例:  python %s run "uci show openclash | head"' % os.path.basename(__file__))
+    return 0
+
+
+# ---------------------------------------------------------------- setup
+def _parse_authorized_keys(content, pubkey):
+    lines = [l.strip() for l in content.splitlines() if l.strip()]
+    if any(pubkey.split()[1] in l for l in lines):
+        return None  # 已存在
+    lines.append(pubkey)
+    return "\n".join(lines) + "\n"
+
+
+def cmd_setup(args):
+    out("=" * 62)
+    out("OpenClash 管理技能 — 配置连接")
+    out("=" * 62)
+
+    # ---- 收集参数 ----
+    host = args.host
+    user = args.user
+    password = args.password or os.environ.get("OC_PASSWORD")
+    if args.password_file:
+        with open(args.password_file, encoding="utf-8") as f:
+            password = f.read().strip()
+    keyfile = os.path.expanduser(args.key) if args.key else None
+    port = int(args.port or 22)
+
+    interactive = sys.stdin.isatty() and not host and not keyfile
+    if interactive:
+        out("\n需要以下信息 (直接回车使用括号内默认值):\n")
+        host = input("  路由器 IP [192.168.1.1]: ").strip() or "192.168.1.1"
+        user = input("  SSH 用户名 [root]: ").strip() or "root"
+        port = int(input("  SSH 端口 [22]: ").strip() or "22")
+        use_key = input("  已有私钥? 输入私钥路径 (留空则用密码): ").strip()
+        if use_key:
+            keyfile = os.path.expanduser(use_key)
+        else:
+            password = getpass.getpass("  SSH 密码: ")
+
+    if not host:
+        die("缺少 --host")
+    user = user or "root"
+
+    if keyfile:
+        if not os.path.isfile(keyfile):
+            die("私钥不存在: %s" % keyfile)
+        cfg = {"host": host, "port": port, "user": user, "key": keyfile}
+        out("\n[1/2] 用现有私钥测试连接 ...")
+        cli = connect(cfg)
+        cli.close()
+        out("  成功")
+        p = save_config(cfg)
+        out("\n[2/2] 已保存: %s" % p)
+        out("完成，可以直接使用。")
+        return 0
+
+    if not password:
+        die("缺少密码。用 --password / --password-file / OC_PASSWORD，或交互式运行")
+
+    # ---- 步骤 1: 密码连接 ----
+    out("\n[1/4] 用密码连接 %s ..." % host)
+    tmp = {"host": host, "port": port, "user": user, "password": password}
+    cli = connect(tmp)
+    rc, o, _ = run_remote(cli, "cat /etc/openwrt_release 2>/dev/null | grep -E 'DISTRIB_(ID|RELEASE)'; uname -m")
+    out("  成功. 远端: %s" % " | ".join(x for x in o.strip().splitlines() if x))
+    rc, o, _ = run_remote(cli, "pidof clash >/dev/null && echo yes || echo no")
+    out("  OpenClash 运行中: %s" % o.strip())
+
+    if args.no_key:
+        cli.close()
+        p = save_config(tmp)
+        out("\n[2/4] --no-key 已指定，跳过密钥配置")
+        out("已保存(密码明文): %s" % p)
+        out("完成。")
+        return 0
+
+    # ---- 步骤 2: 生成密钥 ----
+    out("\n[2/4] 生成 SSH 密钥 ...")
+    keypath, pubkey = generate_key(KEY_PATH)
+    if not keypath:
+        out("  cryptography 不可用，回退到密码模式")
+        cli.close()
+        p = save_config(tmp)
+        out("已保存(密码明文): %s" % p)
+        return 0
+    out("  私钥: %s" % keypath)
+    out("  公钥: %s" % pubkey)
+
+    # ---- 步骤 3: 部署公钥 ----
+    out("\n[3/4] 部署公钥到路由器 ...")
+    rc, existing, _ = run_remote(cli, "cat %s 2>/dev/null" % REMOTE_AUTHORIZED)
+    merged = _parse_authorized_keys(existing, pubkey)
+    if merged is None:
+        out("  公钥已存在，跳过")
+    else:
+        sftp = cli.open_sftp()
+        with sftp.open(REMOTE_AUTHORIZED, "w") as f:
+            f.write(merged)
+        sftp.close()
+        out("  已写入 %s" % REMOTE_AUTHORIZED)
+    run_remote(cli, "chmod 700 /etc/dropbear 2>/dev/null; chmod 600 %s" % REMOTE_AUTHORIZED)
+    out("  权限已设为 600")
+
+    # 确认 dropbear 允许公钥认证
+    rc, o, _ = run_remote(cli, "uci -q get dropbear.main.PasswordAuth; "
+                               "uci -q get dropbear.main.RootPasswordAuth; "
+                               "ls /etc/init.d/dropbear >/dev/null && echo has_dropbear")
+    if "has_dropbear" not in o:
+        out("  提示: 未发现 dropbear 服务，若用 OpenSSH 请确认 ~/.ssh/authorized_keys")
+    cli.close()
+
+    # ---- 步骤 4: 验证密钥登录 ----
+    out("\n[4/4] 验证密钥登录 ...")
+    cfg = {"host": host, "port": port, "user": user, "key": keypath}
+    cli2 = connect(cfg)
+    rc, o, _ = run_remote(cli2, "echo KEY_OK; uname -n 2>/dev/null || cat /proc/sys/kernel/hostname")
+    cli2.close()
+    if "KEY_OK" not in o:
+        die("密钥登录验证失败，未保存配置。公钥可能未被接受。", 8)
+    out("  成功 (免密)")
+
+    p = save_config(cfg)
+    out("\n" + "=" * 62)
+    out("配置完成! 配置已保存到: %s" % p)
+    out("(不包含密码，只记录私钥路径)")
+    out("=" * 62)
+    out("\n验证:  python %s probe" % os.path.basename(__file__))
+    return 0
+
+
+# ---------------------------------------------------------------- run
+def cmd_run(args):
+    cfg, _ = load_config()
+    cmds = args.command if isinstance(args.command, list) else [args.command]
+    cli = connect(cfg)
+    try:
+        for c in cmds:
+            c = _remote_path(c)
+            out("$ " + c)
+            rc, o, e = run_remote(cli, c, timeout=args.timeout)
+            if o:
+                sys.stdout.write(o if o.endswith("\n") else o + "\n")
+            if e.strip():
+                sys.stderr.write("[stderr] " + (e if e.endswith("\n") else e + "\n"))
+            if rc != 0:
+                out("[exit=%d]" % rc)
+            out()
+    finally:
+        cli.close()
+    return 0
+
+
+# ---------------------------------------------------------------- probe
+PROBE_SCRIPT = r'''
+echo "### 系统"
+cat /etc/openwrt_release 2>/dev/null | grep -E 'DISTRIB_(ID|RELEASE|TARGET|ARCH)'
+uname -r
+command -v fw4 >/dev/null && echo "firewall: fw4 (nftables)" || echo "firewall: fw3 (iptables)"
+
+echo
+echo "### 内存"
+free -m | head -2
+
+echo
+echo "### OpenClash 运行状态"
+printf 'clash PID   : '; pidof clash || echo "(未运行)"
+printf '插件启用    : '; uci -q get openclash.@openclash[0].enable
+printf '运行模式    : '; uci -q get openclash.@openclash[0].en_mode
+printf '代理模式    : '; uci -q get openclash.@openclash[0].proxy_mode
+printf '核心类型    : '; uci -q get openclash.@openclash[0].core_type
+printf '内核版本    : '; /etc/openclash/clash -v 2>&1 | head -1
+printf '配置文件    : '; uci -q get openclash.@openclash[0].config_path
+printf 'API 端口    : '; uci -q get openclash.@openclash[0].cn_port
+
+echo
+echo "### 端口监听"
+netstat -tlnp 2>/dev/null | grep -E '7874|7892|7895|9090|7890|7891|7893' | awk '{print "  "$4" "$7}'
+
+echo
+echo "### 配置文件"
+ls -la /etc/openclash/config/*.yaml 2>/dev/null | awk '{print "  "$5" "$9}'
+
+echo
+echo "### 覆写模块"
+ls /etc/openclash/overwrite/ 2>/dev/null | sed 's/^/  /'
+echo "  UCI 条目:"
+uci show openclash 2>/dev/null | grep -E 'config_overwrite\[[0-9]+\]\.(name|enable|config)' | sed 's/^/    /'
+
+echo
+echo "### 防火墙链"
+nft list chain inet fw4 openclash 2>/dev/null | head -3
+nft list chain inet fw4 dstnat 2>/dev/null | grep -c 'OpenClash DNS' | sed 's/^/  DNS劫持规则数: /'
+ip rule show 2>/dev/null | grep 0x162 | sed 's/^/  策略路由: /'
+
+echo
+echo "### 最近启动日志"
+tail -6 /tmp/openclash_start.log 2>/dev/null | sed 's/^/  /'
+'''
+
+
+def cmd_probe(args):
+    cfg, _ = load_config()
+    cli = connect(cfg)
+    try:
+        rc, o, e = run_remote(cli, PROBE_SCRIPT, timeout=60)
+        sys.stdout.write(o)
+        if e.strip():
+            sys.stderr.write("[stderr] " + e + "\n")
+    finally:
+        cli.close()
+    return 0
+
+
+# ---------------------------------------------------------------- transfer
+def _local_path(p):
+    """把 Git-Bash/MSYS 风格的 /c/... 或 /tmp/... 本地路径转成 Windows 可识别路径。
+    Windows 上 Python 无法打开字面量 '/tmp/x'。"""
+    if os.name != "nt" or not p:
+        return p
+    q = p.replace("/", os.sep)
+    # /c/Users/... -> C:/Users/...
+    if len(q) >= 2 and q[0] == os.sep and q[1].isalpha() and (len(q) == 2 or q[2] == os.sep):
+        q = q[1].upper() + ":" + q[2:]
+    if os.path.exists(q):
+        return q
+    # /tmp/x -> MSYS 临时目录
+    for root in (os.environ.get("TEMP"), os.environ.get("TMP"), os.path.expanduser("~/AppData/Local/Temp")):
+        if root and q.startswith(os.sep + "tmp" + os.sep):
+            cand = os.path.join(root, q.split(os.sep + "tmp" + os.sep, 1)[1])
+            if os.path.exists(cand):
+                return cand
+    return q if os.path.exists(q) else p
+
+
+def _remote_path(p):
+    """还原 Git-Bash/MSYS 对远端路径的自动转换。
+    MSYS 会把 '/root/x' 改成 'C:/Program Files/Git/root/x'，需逆转回 '/root/x'。
+    只对纯路径生效，含空格的命令不做改写。
+    """
+    if not p:
+        return p
+    q = p.replace("\\", "/")
+    low = q.lower()
+    for prefix in ("c:/program files/git/", "c:/program files (x86)/git/",
+                   "c:/msys64/", "c:/cygwin64/", "c:/cygwin/"):
+        if low.startswith(prefix):
+            tail = q[len(prefix):]
+            # 只有看起来像远端路径时才还原（避免吞掉真实命令）
+            if tail.startswith(("root/", "etc/", "tmp/", "usr/", "var/", "opt/",
+                                "home/", "mnt/", "www/", "lib/", "bin/", "sbin/",
+                                "proc/", "sys/", "dev/")):
+                return "/" + tail
+    return p
+
+
+def cmd_push(args):
+    cfg, _ = load_config()
+    local = _local_path(args.local)
+    remote = _remote_path(args.remote)
+    if not os.path.isfile(local):
+        die("本地文件不存在: %s" % args.local, 9)
+    cli = connect(cfg)
+    try:
+        sftp = cli.open_sftp()
+        sftp.put(local, remote)
+        sftp.close()
+        out("已上传: %s -> %s" % (local, remote))
+        rc, o, _ = run_remote(cli, "ls -la %s" % shlex.quote(remote))
+        out(o.rstrip())
+    finally:
+        cli.close()
+    return 0
+
+
+def cmd_pull(args):
+    cfg, _ = load_config()
+    remote = _remote_path(args.remote)
+    cli = connect(cfg)
+    try:
+        local = _local_path(args.local)
+        if local.endswith(("/", os.sep)):
+            os.makedirs(local, exist_ok=True)
+            local = os.path.join(local, posixpath.basename(remote))
+        d = os.path.dirname(os.path.abspath(local))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        sftp = cli.open_sftp()
+        sftp.get(remote, local)
+        sftp.close()
+        out("已下载: %s -> %s (%d 字节)" % (remote, local, os.path.getsize(local)))
+    finally:
+        cli.close()
+    return 0
+
+
+# ---------------------------------------------------------------- misc
+def cmd_show_config(args):
+    cfg, p = load_config()
+    safe = dict(cfg)
+    if safe.get("password"):
+        safe["password"] = "<已设置，%d 字符>" % len(safe["password"])
+    out("配置文件: %s" % p)
+    out(json.dumps(safe, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_forget(args):
+    p = config_path_existing()
+    if not p:
+        out("没有已保存的配置")
+        return 0
+    if not args.yes:
+        ans = input("确定删除 %s ? [y/N] " % p).strip().lower()
+        if ans not in ("y", "yes"):
+            out("已取消")
+            return 1
+    os.remove(p)
+    out("已删除: %s" % p)
+    return 0
+
+
+# ---------------------------------------------------------------- main
+def main():
+    ap = argparse.ArgumentParser(
+        prog="oc.py",
+        description="OpenWrt / OpenClash 管理入口",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    sub = ap.add_subparsers(dest="cmd")
+
+    sub.add_parser("doctor", help="检查环境与配置状态")
+    sub.add_parser("probe", help="一览 OpenClash 运行状态")
+
+    s = sub.add_parser("setup", help="配置连接 (生成并部署密钥)")
+    s.add_argument("--host")
+    s.add_argument("--port", default=None)
+    s.add_argument("--user", default=None)
+    s.add_argument("--password")
+    s.add_argument("--password-file")
+    s.add_argument("--key", help="使用已有私钥，跳过密码流程")
+    s.add_argument("--no-key", action="store_true", help="不生成密钥，保存明文密码")
+
+    r = sub.add_parser("run", help="执行远端命令")
+    r.add_argument("command", nargs="+")
+    r.add_argument("--timeout", type=int, default=None)
+
+    pu = sub.add_parser("push", help="上传文件")
+    pu.add_argument("local")
+    pu.add_argument("remote")
+
+    pl = sub.add_parser("pull", help="下载文件")
+    pl.add_argument("remote")
+    pl.add_argument("local")
+
+    sub.add_parser("show-config", help="显示配置(隐藏密码)")
+
+    f = sub.add_parser("forget", help="删除已保存配置")
+    f.add_argument("-y", "--yes", action="store_true")
+
+    args = ap.parse_args()
+    if not args.cmd:
+        ap.print_help()
+        return 1
+
+    handlers = {
+        "doctor": cmd_doctor,
+        "setup": cmd_setup,
+        "run": cmd_run,
+        "probe": cmd_probe,
+        "push": cmd_push,
+        "pull": cmd_pull,
+        "show-config": cmd_show_config,
+        "forget": cmd_forget,
+    }
+    return handlers[args.cmd](args) or 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
