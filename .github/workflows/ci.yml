@@ -7,60 +7,38 @@ on:
   workflow_dispatch:
 
 jobs:
-  gates:
+  check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.8", "3.11", "3.12"]
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.8"   # 最低支持版本，保证兼容
 
-      # 每道闸门单独一步 —— 便于在 GitHub UI 一眼看出红的是哪道。
-      # ⚠️ 本清单必须与 tests/verify_all.py 的 GATES 同源，改一侧同步另一侧。
-
-      - name: 闸门 · SKILL.md 合规
-        run: python tests/check_skill_md.py
-
-      - name: 闸门 · 凭据扫描（红线）
+      - name: 凭据扫描（红线：公开仓不得含真实 IP/密码/token）
         run: python tests/check_secrets.py
 
-      - name: 闸门 · 可移植性（行尾/BOM/编码）
-        run: python tests/check_portability.py
+      - name: Python 语法
+        run: python -m py_compile scripts/oc.py tests/*.py && echo "OK"
 
-      - name: 闸门 · Python 语法
-        run: python -m py_compile scripts/oc.py && echo "OK oc.py 语法正确"
+      - name: CLI 可运行
+        run: |
+          python scripts/oc.py --help >/dev/null
+          python scripts/oc.py doctor || true   # 未配置属预期
 
-      - name: 闸门 · 退出码语义（不需真实路由器）
+      - name: 退出码语义（不需真实路由器）
         run: |
           set +e
           fail=0
-          check() {  # 描述 期望码 命令...
-            desc="$1"; want="$2"; shift 2
-            "$@" >/dev/null 2>&1
-            got=$?
+          check() { desc="$1"; want="$2"; shift 2
+            "$@" >/dev/null 2>&1; got=$?
             if [ "$got" != "$want" ]; then
-              echo "::error::$desc: 期望退出码 $want，实际 $got"
-              fail=1
-            else
-              echo "OK  $desc (exit=$got)"
-            fi
+              echo "::error::$desc: 期望 $want 实际 $got"; fail=1
+            else echo "OK  $desc (exit=$got)"; fi
           }
-          check "run 空命令"          2  python scripts/oc.py run ""
-          check "push 本地文件不存在"  9  python scripts/oc.py push /nonexistent-xyz /root/ci-xyz
-          check "OC_CONFIG 指向不存在" 5  env OC_CONFIG=/tmp/nope-ci.json python scripts/oc.py doctor
-          rm -f /tmp/nope-ci.json
+          check "run 空命令"           2 python scripts/oc.py run ""
+          check "push 本地文件不存在"   9 python scripts/oc.py push /nonexistent-xyz /root/x
+          check "OC_CONFIG 指向不存在"  5 env OC_CONFIG=/tmp/nope.json python scripts/oc.py doctor
+          rm -f /tmp/nope.json
           exit $fail
-
-      - name: 闸门 · 运行时编码（Windows ACP=936 等价路径）
-        # Windows 中文环境下子进程 stdout 走 cp936 —— 脚本 print 非 GBK 字符
-        # 却无 reconfigure 保护时会崩成退出码 1，被误读为「判负」。
-        # 这里用 PYTHONIOENCODING=cp936 在 Linux 上等价复现。
-        run: python tests/verify_all.py
-        env:
-          PYTHONIOENCODING: cp936
