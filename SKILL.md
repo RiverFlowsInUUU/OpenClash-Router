@@ -49,17 +49,48 @@ $OC run "cp -a /etc/openclash/config/proxy.yaml \
          /etc/openclash/config/proxy.yaml.bak-\$(date +%Y%m%d-%H%M%S)"
 $OC push ./work/proxy.yaml /etc/openclash/config/proxy.yaml
 $OC run "/etc/init.d/openclash restart"
+#    ⚠️ restart 会重新生成运行配置（yml_change.sh），但它**内部是后台的、会立即返回**
+#    —— “返回了”不等于“就绪了”。所以必须有下一步的二级闸门。
 
-# ⑥ 验证生效（文件改了 ≠ 生效了）
+# ⑥ 二级闸门：等就绪 + 三查（restart 返回 ≠ 核心可用）
+#    6a 等就绪：就绪判据 = 核心 API 的 /group 返回 200（与 init 脚本同标准）
 $OC run 'SEC=$(uci get openclash.@openclash[0].dashboard_password)
          PORT=$(uci get openclash.@openclash[0].cn_port)
-         curl -s -H "Authorization: Bearer $SEC" http://127.0.0.1:$PORT/proxies'
+         for i in $(seq 1 30); do
+           code=$(curl -m 5 -s -o /dev/null -w "%{http_code}" \
+                  -H "Authorization: Bearer $SEC" \
+                  http://127.0.0.1:$PORT/group)
+           [ "$code" = "200" ] && echo "就绪（${i}s）" && break
+           sleep 1
+         done; [ "$code" = "200" ] || echo "⚠️ 30s 未就绪（HTTP $code）"'
 
-# ⑦ 汇报：改了什么 + 备份路径 + 回滚命令
+#    6b 查错误日志（重启失败会在这暴露）
+$OC run "tail -30 /tmp/openclash.log | grep -E 'level=(error|fatal)' || echo '无 error/fatal'"
+
+#    6c 真实链路（最关键：核心活着 ≠ 流量能出去）
+#        前提：router_self_proxy=1（路由器自身流量走代理）。若为 0，此测试只验直连。
+$OC run "curl -s -o /dev/null -w '真实链路 HTTP %{http_code} 耗时 %{time_total}s\n' \
+         --max-time 10 https://www.gstatic.com/generate_204"
+#    6c 期望 204；返回 000/超时 = 代理不通（节点/订阅/规则问题）
+
+# ⑦ 清理临时文件（/tmp 是内存盘，别堆垃圾）
+$OC run "rm -f /tmp/proxy.yaml"
+
+# ⑧ 汇报：改了什么 + 备份路径 + 回滚命令
 ```
 
 **为什么这个顺序**：④ 在 ⑤ 前面 → 语法错不会导致断网；备份在替换前 → 有退路；
-⑥ 单独一步 → 文件写对只是前提，运行时真变了才算成。
+⑥ 单独一步 → **restart 会立即返回，文件写对只是前提，运行时真就绪才算成**。
+
+**重载方式的选择**（改了什么决定用哪个）：
+
+| 改了什么 | 用什么重载 | 会重新生成运行配置吗 |
+|---------|-----------|------------------|
+| 源配置 `config/<name>.yaml` | `/etc/init.d/openclash restart` | ✅ 是（跑 `yml_change.sh`） |
+| 防火墙 / 访问控制 | `/etc/init.d/openclash reload` | ❌ 只重建防火墙链 |
+| 策略组选择 | 内核 API `PUT /configs` | ❌ 热改 |
+
+改了源配置**必须用 restart** —— `reload` 不会重新生成运行配置，改动进不去。
 
 **push 是独立确认项**：用户说「改吧」只授权本地/设备改动；说「推」才 `git push`。
 
@@ -75,7 +106,9 @@ $OC run 'SEC=$(uci get openclash.@openclash[0].dashboard_password)
 2. **改前备份，把回滚方式告诉用户。** 路由器没有 git ——
    `cp -a` 的备份是唯一退路，用户要能自己退回去。
 
-3. **先校验再替换。** `clash -t` 不通过绝不覆盖，否则核心起不来直接断网。
+3. **先校验再替换，改后用二级闸门确认就绪。** `clash -t` 不通过绝不覆盖，
+   否则核心起不来直接断网；`restart` 会立即返回（内部是后台的），
+   必须用 §1 ⑥ 等就绪（`/group` 返回 200）+ 查日志 + 真实链路测试才算成功。
 
 4. **防失联。** 改防火墙/DNS/SSH 前想清楚「改坏了怎么连回来」：
    - 改 SSH/dropbear 最后做，别弄断当前会话
@@ -188,7 +221,7 @@ Fake-IP 模式下 `dig` 无意义（返回假 IP），要看规则命中。
 ## 6 · 工具箱
 
 所有操作通过 `scripts/oc.py`（黑盒调用，用 `--help` 看用法，**别读源码** ——
-约 900 行会挤占上下文）。
+约 920 行会挤占上下文）。
 
 ```bash
 python <技能目录>/scripts/oc.py where      # 打印技能/脚本/配置绝对路径
