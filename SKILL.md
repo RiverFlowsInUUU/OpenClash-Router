@@ -49,8 +49,10 @@ $OC run "cp -a /etc/openclash/config/proxy.yaml \
          /etc/openclash/config/proxy.yaml.bak-\$(date +%Y%m%d-%H%M%S)"
 $OC push ./work/proxy.yaml /etc/openclash/config/proxy.yaml
 $OC run "/etc/init.d/openclash restart"
-#    ⚠️ restart 会重新生成运行配置（yml_change.sh），但它**内部是后台的、会立即返回**
-#    —— “返回了”不等于“就绪了”。所以必须有下一步的二级闸门。
+#    restart 没有「前台」选项，它内部是同步+异步混合（实测 init 源码）：
+#      同步完成：Step 1-3 —— 含 yml_change.sh 重新生成运行配置（返回时已完成）
+#      后台进行：Step 4 注册核心（procd，不等进程）+ Step 6 等就绪/建防火墙（带 &）
+#    ⇒ restart 返回时「配置已写到文件层面」，但「运行时未就绪」→ 必须自己轮询（⑥）
 
 # ⑥ 二级闸门：等就绪 + 三查（restart 返回 ≠ 核心可用）
 #    6a 等就绪：就绪判据 = 核心 API 的 /group 返回 200（与 init 脚本同标准）
@@ -80,7 +82,8 @@ $OC run "rm -f /tmp/proxy.yaml"
 ```
 
 **为什么这个顺序**：④ 在 ⑤ 前面 → 语法错不会导致断网；备份在替换前 → 有退路；
-⑥ 单独一步 → **restart 会立即返回，文件写对只是前提，运行时真就绪才算成**。
+⑥ 单独一步 → **restart 返回 ≠ 核心就绪**（它只保证配置已重新生成，
+就绪是后台在做的）——文件写对只是前提，运行时真就绪才算成。
 
 **重载方式的选择**（改了什么决定用哪个）：
 
