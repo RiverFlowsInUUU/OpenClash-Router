@@ -1,26 +1,77 @@
 ---
 name: openclash-router
-description: 通过 SSH 操作 OpenWrt/iStoreOS 路由器上的 OpenClash —— 改配置、加节点、调分流、排障、清理。技能聚焦「操作流程」：自动装依赖(paramiko)、自动配置免密连接、以及安全改配置的规程。当用户提到 软路由、路由器、旁路由、OpenClash、加节点、分流、订阅、改配置、内存占用、DNS、代理不通 时使用。
+description: 通过 SSH 操作 OpenWrt/iStoreOS 路由器上的 OpenClash —— 改配置、加节点、调分流、排障、清理。技能聚焦「操作流程」：自动装依赖(paramiko)、自动配置免密连接、安全改配置的规程；OpenClash 领域知识一律引用官方文档。当用户提到 软路由、路由器、旁路由、OpenClash、加节点、分流、订阅、改配置、内存占用、DNS、代理不通 时使用。
 ---
 
 # OpenClash 路由器操作技能
 
 用 SSH 管理 **OpenWrt / iStoreOS** 上的 **OpenClash**。
 
-**本技能只负责"怎么操作"**（环境准备、连接配置、改动规程）。
-**OpenClash 自身的功能知识**（每个选项含义、防火墙链、覆写语法、错误速查）
-请看官方知识库 —— 见下方「领域知识」一节。
+---
+
+## 🚨 先读这个：两套知识分工
+
+本技能**只教你怎么操作**。**OpenClash 的功能知识不在本技能里**，
+你必须去官方知识库查——**不要自己猜、不要凭记忆编**。
+
+> # 📖 遇到 OpenClash 功能问题，先抓官方文档
+>
+> ```bash
+> curl -sL -o /tmp/oc-guide.md \
+>   https://raw.githubusercontent.com/vernesong/OpenClash/master/.github/skills/openclash-user-guide/SKILL.md
+> grep -n "关键词" /tmp/oc-guide.md        # 检索
+> sed -n '100,140p' /tmp/oc-guide.md      # 读上下文
+> ```
+>
+> 源地址：https://github.com/vernesong/OpenClash/blob/master/.github/skills/openclash-user-guide/SKILL.md
+
+### 什么时候必须去查官方文档
+
+凡涉及**下面任何一项**，先查官方文档再动手：
+
+- 某个 UCI 选项 / LuCI 选项**是什么意思**、有哪些取值
+- **防火墙链**结构（`openclash` / `openclash_mangle` / `dstnat` …）
+- **覆写模块**语法（`[General]` / `[Overwrite]` / `[YAML]`、`!` `+` `-` `*` 操作符）
+- **DNS** 配置（nameserver / fallback / nameserver-policy / fake-ip-filter）
+- **分流规则**写法、rule-provider / proxy-provider
+- **报错信息**的含义与修复（16 大类错误速查表）
+- **订阅**处理、Age 加密、节点过滤
+- 任何「为什么这个选项不生效」的**底层实现**问题
+
+### 官方文档覆盖范围
+
+| 章节 | 内容 |
+|------|------|
+| 依赖清单与故障排查 | 各包作用、缺失症状 |
+| 系统架构与启动流程 | UCI → 脚本 → YAML 的转换链路 |
+| 防火墙与 DNS 规则详解 | fw3/fw4 双后端、每条链的规则顺序 |
+| 日志与错误信息速查 | 16 大类错误关键字 → 原因 → 排查路径 |
+| 各页面选项详解 | 运行状态 / 插件设置 / 覆写设置 / 订阅 / 配置管理 / 日志 |
+| 诊断命令与 CLI 参考 | 决策树、LuCI HTTP API、Mihomo 原生 API、脚本速查 |
+| 覆写模块详解 | INI 三段格式、`[YAML]` 操作符、允许的 General key |
+
+### 其他权威来源
+
+| 资源 | 用途 |
+|------|------|
+| https://wiki.metacubex.one/config/ | Mihomo 配置字段 |
+| https://github.com/vernesong/OpenClash/issues | 插件侧已知问题（先搜再问） |
+| https://github.com/MetaCubeX/mihomo/issues | 内核侧已知问题 |
+| https://github.com/vernesong/OpenClash/tree/dev | 插件源码 |
+
+**查不到就说查不到**，并给出上面链接。**禁止编造字段名、选项值、错误解释。**
 
 ---
 
 ## 职责边界
 
-| 本技能管 | 不管（查官方） |
-|---------|--------------|
+| 本技能管（操作流程） | 官方文档管（领域知识） |
+|---------------------|----------------------|
 | 装依赖、配 SSH 免密 | 某个 UCI 选项是什么意思 |
 | 连接测试、环境自检 | 防火墙链怎么建、覆写模块怎么写 |
 | **安全修改配置的规程** | Mihomo 各协议参数 |
 | 备份/回滚/验证流程 | 错误码逐条解释 |
+| **环境层面的坑**（iStoreOS 专有） | OpenClash 自身的行为 |
 
 ---
 
@@ -124,6 +175,10 @@ Bash 的 `/tmp` 在 Windows Python 里不存在（自动映射到真实 TEMP）�
 
 ## 改配置的规程（最重要）
 
+> ⚠️ **动手前先确认你懂要改的那个东西。**
+> 如果你不确定某个字段/选项的含义，**先去抓官方文档**（见文首 🚨 一节）。
+> 本技能只教流程，**不提供字段含义**。凭记忆改配置 = 事故。
+
 ### 铁律 1：改源文件，不改运行配置
 
 | 文件 | 性质 |
@@ -174,6 +229,14 @@ $OC run "/etc/init.d/openclash restart"
 
 ## 排障流程
 
+> ⚠️ **遇到报错先查官方错误速查表**，不要凭经验猜：
+> ```bash
+> curl -sL -o /tmp/oc-guide.md \
+>   https://raw.githubusercontent.com/vernesong/OpenClash/master/.github/skills/openclash-user-guide/SKILL.md
+> grep -n "报错关键字" /tmp/oc-guide.md
+> ```
+> 官方表里有一项匹配，就按它的「排查方法」列走，比自己推测可靠得多。
+
 **顺序**（别跳步，别猜）：
 
 1. `$OC doctor` — 环境是否就绪
@@ -183,7 +246,7 @@ $OC run "/etc/init.d/openclash restart"
    `$OC pull /tmp/openclash_debug.log`
 4. 日志不够 → 用 `$OC run` 发精确命令
 5. 定位后给 LuCI 路径或直接改
-6. 仍未解决 → 查 Issues（见下）
+6. 仍未解决 → 查 Issues（见文首「其他权威来源」）
 
 **连接类问题先查这几项**：
 
@@ -197,46 +260,10 @@ $OC run "netstat -tlnp | grep -E '7874|7892|7895|9090'"  # 端口监听
 
 ---
 
-## 领域知识（OpenClash 自身）
-
-**本技能不重复官方内容。** 需要以下知识时，**直接读官方知识库**：
-
-> ### 📖 https://github.com/vernesong/OpenClash/blob/master/.github/skills/openclash-user-guide/SKILL.md
-
-它涵盖：
-
-- **依赖清单与故障排查** —— 各包作用、缺失症状
-- **系统架构与启动流程** —— UCI → 脚本 → YAML 的转换链路
-- **防火墙与 DNS 规则详解** —— fw3/fw4 双后端、每条链的规则顺序
-- **日志与错误信息速查** —— 16 大类错误关键字 → 原因 → 排查路径
-- **各页面选项详解** —— 运行状态 / 插件设置 / 覆写设置 / 订阅 / 配置管理 / 日志
-- **诊断命令与 CLI 参考** —— 决策树、LuCI HTTP API、Mihomo 原生 API、脚本速查
-- **覆写模块详解** —— INI 三段格式、`[YAML]` 操作符（`!` `+` `-` `*`）、允许的 General key
-
-**取用方式**：
-
-```bash
-# 抓取到本地再检索（推荐，避免只读片段）
-curl -sL -o /tmp/oc-guide.md \
-  https://raw.githubusercontent.com/vernesong/OpenClash/master/.github/skills/openclash-user-guide/SKILL.md
-grep -n "关键词" /tmp/oc-guide.md
-```
-
-其他权威来源：
-
-| 资源 | 用途 |
-|------|------|
-| https://wiki.metacubex.one/config/ | Mihomo 配置字段 |
-| https://github.com/vernesong/OpenClash/issues | 插件侧已知问题 |
-| https://github.com/MetaCubeX/mihomo/issues | 内核侧已知问题 |
-
-**不要编造。** 查不到就明说查不到，并给出上述链接。
-
----
-
 ## 环境相关的坑（真实踩过，动手前先读）
 
-这些是**环境层面**的坑（与 OpenClash 无关），官方知识库不会写：
+这些是**环境层面**的坑（与 OpenClash 功能无关），**官方文档不会写**，
+属于本技能的职责范围：
 
 ### 1. iStoreOS 的 `apk` 会卡死
 
