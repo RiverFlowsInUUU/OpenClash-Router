@@ -97,8 +97,8 @@ jobs:
           if "oc.py" not in text:
               sys.exit("SKILL.md 未提及 oc.py")
 
-          known_cmds = {"doctor", "bootstrap", "setup", "probe", "run",
-                        "push", "pull", "show-config", "forget"}
+          known_cmds = {"doctor", "bootstrap", "where", "setup", "probe",
+                        "run", "push", "pull", "show-config", "forget"}
 
           # 捕获两种引用形式:  oc.py <cmd>   以及   $OC <cmd>
           used = set(re.findall(r'oc\.py"?\s+([a-z][a-z-]+)', text))

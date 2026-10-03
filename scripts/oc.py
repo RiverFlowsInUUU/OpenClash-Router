@@ -6,6 +6,7 @@ oc.py — OpenWrt / OpenClash 管理入口 (通用技能)
 子命令:
   doctor              检查环境与配置状态，告诉你还缺什么
   bootstrap           安装/检查本地依赖 (paramiko / cryptography)
+  where               打印技能/脚本/配置的绝对路径
   setup               配置连接 (生成密钥 -> 部署公钥 -> 验证 -> 保存)
   run "<cmd>"         在路由器执行命令 (多条用 ; 或换行)
   probe               一览 OpenClash 运行状态 (只读)
@@ -620,6 +621,15 @@ def cmd_pull(args):
 
 
 # ---------------------------------------------------------------- misc
+def cmd_where(args):
+    """打印本脚本与技能目录的绝对路径（供 agent 定位用）。"""
+    out("技能目录 : %s" % SKILL_DIR)
+    out("脚本     : %s" % os.path.abspath(__file__))
+    cp = config_path_existing()
+    out("配置文件 : %s" % (cp or "(尚未配置)"))
+    return 0
+
+
 def cmd_show_config(args):
     cfg, p = load_config()
     safe = dict(cfg)
@@ -686,6 +696,7 @@ def main():
 
     sub.add_parser("doctor", help="环境自检（依赖 + 连接 + 远端环境）——每次会话第一条命令")
     sub.add_parser("bootstrap", help="安装/检查本地依赖 (paramiko, cryptography)")
+    sub.add_parser("where", help="打印技能/脚本/配置的绝对路径")
     sub.add_parser("probe", help="一览 OpenClash 运行状态（系统/内存/模式/端口/配置/防火墙/日志）")
 
     s = sub.add_parser("setup", help="配置连接（生成并部署密钥，之后免密）")
@@ -722,6 +733,7 @@ def main():
     handlers = {
         "doctor": cmd_doctor,
         "bootstrap": cmd_bootstrap,
+        "where": cmd_where,
         "setup": cmd_setup,
         "run": cmd_run,
         "probe": cmd_probe,

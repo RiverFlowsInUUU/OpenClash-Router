@@ -1,6 +1,9 @@
 # openclash-router
 
-一个 [pi](https://github.com/badlogic/pi-mono) **Agent Skill**：通过 SSH 操作 OpenWrt / iStoreOS 路由器上的 **OpenClash**。
+一个 [Agent Skill](https://agentskills.io/specification)：通过 SSH 操作 OpenWrt / iStoreOS 路由器上的 **OpenClash**。
+
+兼容任何支持 Agent Skills 标准的 agent —— Claude Code / Claude.ai、pi、Cursor 等。
+（标准只要求一个目录 + `SKILL.md`，本仓库即符合。）
 
 **它聚焦「操作流程」** —— 环境准备、连接配置、安全改配置的规程。
 OpenClash 自身的功能知识（选项含义、防火墙链、覆写语法）**引用官方知识库**，不做会过期的副本。
@@ -35,18 +38,28 @@ OpenClash 自身的功能知识（选项含义、防火墙链、覆写语法）*
 
 ## 安装
 
+放进你所用 agent 的技能目录即可（目录名保持 `openclash-router`）：
+
 ```bash
-git clone https://github.com/RiverFlowsInUUU/openclash-router.git ~/.pi/agent/skills/openclash-router
+git clone https://github.com/RiverFlowsInUUU/openclash-router.git <你的技能目录>/openclash-router
 ```
 
-也可放项目级 `.pi/skills/`，或 pi 支持的 `~/.agents/skills/`。
+常见位置（按你的 agent 选一个）：
+
+| Agent / 约定 | 用户级目录 | 项目级目录 |
+|-------------|-----------|-----------|
+| Agent Skills 标准 | `~/.agents/skills/` | `.agents/skills/` |
+| pi | `~/.pi/agent/skills/` | `.pi/skills/` |
+| Claude Code | `~/.claude/skills/` | `.claude/skills/` |
+
+> 标准位置（`~/.agents/skills/`）是通用选择；若你的 agent 有专属目录，用它的即可。
 
 ## 使用
 
 ### 第一步：环境自检
 
 ```bash
-SKILL=~/.pi/agent/skills/openclash-router
+SKILL=/path/to/openclash-router      # 换成实际技能目录
 python $SKILL/scripts/oc.py doctor
 ```
 
@@ -72,7 +85,7 @@ python $SKILL/scripts/oc.py setup --host 192.168.1.1 --user root --password 'xxx
 ### 第三步：日常使用
 
 ```bash
-OC="python ~/.pi/agent/skills/openclash-router/scripts/oc.py"
+OC="python /path/to/openclash-router/scripts/oc.py"   # 换成实际路径
 
 $OC probe                       # OpenClash 状态总览
 $OC run "uci show openclash"    # 执行远端命令
@@ -82,7 +95,7 @@ $OC show-config                 # 查看配置（密码隐藏）
 $OC forget -y                   # 删除配置
 ```
 
-在 pi 里说人话也行：
+直接对 agent 说人话也行：
 
 - "帮我给软路由加个节点"
 - "为什么这个域名走了直连"
@@ -95,6 +108,7 @@ $OC forget -y                   # 删除配置
 |------|------|
 | `doctor` | 环境自检 + 引导配置 |
 | `bootstrap` | 安装/检查本地依赖 |
+| `where` | 打印技能/脚本/配置的绝对路径 |
 | `setup` | 配置连接（生成并部署密钥） |
 | `probe` | OpenClash 运行状态总览 |
 | `run "<cmd>"` | 执行远端命令 |
@@ -106,7 +120,7 @@ $OC forget -y                   # 删除配置
 
 ```
 .
-├── SKILL.md                     # 技能说明（pi 读取，<500 行）
+├── SKILL.md                     # 技能说明（agent 读取，<500 行）
 ├── scripts/oc.py                # 管理工具（设计为黑盒调用，用 --help 看用法）
 ├── .github/workflows/ci.yml     # CI
 ├── README.md

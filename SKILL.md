@@ -39,7 +39,14 @@ DNS 配置（nameserver / fallback / nameserver-policy / fake-ip-filter）·
 
 ## 工具箱
 
-所有操作通过一个脚本：`$SKILL/scripts/oc.py`（`$SKILL` 是技能目录，pi 会在系统提示里给出）。
+所有操作通过技能自带的脚本：`scripts/oc.py`（在**本技能目录**下）。
+
+下文用 `$SKILL` 指代技能目录。你的 agent 加载技能时通常会告知其绝对路径；
+不确定时让脚本自己报：
+
+```bash
+python <技能目录>/scripts/oc.py where      # 打印技能/脚本/配置的绝对路径
+```
 
 > 💡 **把脚本当黑盒用，不要读它的源码。**
 > 它有 600+ 行，读进来会挤占你的上下文，而它本来就是设计成直接调用的。
@@ -53,6 +60,7 @@ DNS 配置（nameserver / fallback / nameserver-policy / fake-ip-filter）·
 |------|------|
 | `doctor` | 环境自检。**每次会话第一条命令**，它会告诉你缺什么 |
 | `bootstrap` | 显式安装本地依赖（一般不用，缺依赖时会自动装） |
+| `where` | 打印技能/脚本/配置的绝对路径 |
 | `setup` | 配置连接（生成密钥、部署公钥、验证） |
 | `probe` | OpenClash 状态总览（只读，排查从这开始） |
 | `run "<cmd>"` | 在路由器执行命令 |
