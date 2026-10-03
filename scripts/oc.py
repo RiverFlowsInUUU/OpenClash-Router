@@ -375,9 +375,23 @@ def cmd_doctor(args):
 
 # ---------------------------------------------------------------- setup
 def _parse_authorized_keys(content, pubkey):
+    """把 pubkey 合并进 authorized_keys 内容，返回新内容；已存在则返回 None。
+
+    注意：必须**按字段精确匹配**（比较第一个空白分隔字段，即密钥类型），
+    不能用子串包含判断 —— 'AAAAB3' 会误命中 'AAAA...'，
+    导致路由器上已有其他钥时被误判为已存在、跳过部署。
+    """
+    pub_fields = pubkey.split()
+    pub_type, pub_body = pub_fields[0], pub_fields[1]
+
     lines = [l.strip() for l in content.splitlines() if l.strip()]
-    if any(pubkey.split()[1] in l for l in lines):
-        return None  # 已存在
+    for line in lines:
+        if line.startswith("#"):
+            continue
+        fields = line.split()
+        # authorized_keys 行：type base64 [comment]
+        if len(fields) >= 2 and fields[0] == pub_type and fields[1] == pub_body:
+            return None  # 已存在
     lines.append(pubkey)
     return "\n".join(lines) + "\n"
 

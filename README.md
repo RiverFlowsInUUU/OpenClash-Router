@@ -65,13 +65,15 @@ python <技能目录>/scripts/oc.py setup
 
 ```
 .
-├── SKILL.md                     # 技能主体（AI 读这个）：动线 / 铁律 / 按需索引
+├── SKILL.md                     # 技能主体（AI 读这个）：两层模型 / 动线 / 铁律 / 按需索引
 ├── reference/                   # 按需加载的细节
+│   ├── two-layers.md            # ⭐ 两层模型：改仓库 vs 改设备、防失联、回滚
 │   ├── pitfalls.md              # 环境坑（apk 死锁、组件隐藏依赖、hotplug…）
 │   ├── gates.md                 # 闸门与退出码协议
-│   └── tasks.md                 # 具体任务配方
+│   ├── tasks.md                 # 具体任务配方
+│   └── boundaries.md            # 已论定清单（防重复争论）
 ├── scripts/oc.py                # 管理工具（黑盒调用，用 --help 看用法）
-├── tests/                       # 闸门
+├── tests/                       # 闸门（守仓库，不守设备）
 │   ├── check_skill_md.py        # S1-S7
 │   ├── check_secrets.py         # C1-C3（红线）
 │   ├── check_portability.py     # P1-P5
