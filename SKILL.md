@@ -20,6 +20,22 @@ description: 通过 SSH 操作 OpenWrt/iStoreOS 路由器上的 OpenClash ——
 > 深层原因：本仓库只是**工具**，真正要改的是路由器上的运行状态。
 > 仓库的 CI 全绿不代表路由器改对了；`git revert` 也回滚不了路由器。
 
+### ⚠️ 接手「别的 AI / 别人改坏了」的现场（高频真实场景）
+
+用户常这么说：「**之前那个 AI 把我的 OpenClash 搞坏了，显示在运行但上不了网**」。
+
+这类现场有三条铁律，违反任何一条都会白干甚至更糟：
+
+1. **先取证，再动手。** 第一时间找**备份**做 diff —— 而不是靠日志猜、靠现象猜。
+   路由器上通常有历史备份（`/etc/config/openclash.bak-*`），diff 一次就能把
+   「谁改了什么」全部列出来。**没有 diff 就没有结论。**
+2. **不要怀疑用户说没坏的东西。** 用户说「节点没问题」就是没问题。
+   别去批量测节点、别去改节点，先把**配置层**的差异查清楚。
+3. **别用「切换可用节点」掩盖问题。** 切节点能让网络暂时通，但那是**绕过**不是**修复**，
+   真正的配置损坏依然在，下次重启/订阅更新照样复发。
+
+> 本技能 §10 就是为此写的完整排错流程 —— 接手损坏现场时**先读它**。
+
 ---
 
 ## 1 · 标准流程（改配置就这么几步）
@@ -402,3 +418,127 @@ python "$SKILL/scripts/oc.py" setup --host <IP> --user root --password '<密码>
 - 本仓库是公开的，真实凭据不进仓库（`OC_CONFIG` 默认在仓库外）
 - 修改本仓库文件后：跑 `python tests/check_secrets.py` 再提交；
   **`git push` 需用户单独确认**
+
+---
+
+## 10 · 接手「被改坏了」的现场（排错流程）
+
+**适用**：用户说「之前那个 AI 把 OpenClash 改坏了」「显示运行中，但上不了网」。
+**核心原则：先取证（diff 备份），再定位，最后才改。** 全程只读优先。
+
+### 第 0 步 · 先看清「坏」的真实含义
+
+不要接受「打不开 Google」这种单点描述 —— 它只是**验证手段**，不是故障范围。
+先问清楚（或自己测）三件事：
+
+| 问题 | 怎么测 | 说明什么 |
+|------|-------|---------|
+| 国内直连通不通 | `curl -o /dev/null -w '%{http_code}' https://www.baidu.com` | 200 = WAN 与 IPv4 正常，问题在代理侧 |
+| 需要代理的都慢/不通？ | 测 2-3 个不同策略组的站点 | 判断是「全局性」还是「某个组」 |
+| 是「完全不通」还是「很慢」？ | 看 `time_total` | 慢 = 大量等待超时，通常指向 DNS / 地址族问题 |
+
+> ⚠️ **别把单个域名当成根因**。Google 不通 ≠ Google 坏了。
+> 要问「是不是**所有**需要代理的都不行」，这决定了排查方向。
+
+### 第 1 步 · 找备份做 diff（**最高价值的一步**）
+
+被改坏 ≠ 需要重新推导。路由器上通常留着改动前的备份，**diff 一次全部现形**：
+
+```bash
+$OC run "ls -la /etc/config/openclash*"          # 找历史备份（通常带日期）
+```
+
+拿到两份文件后在**本地**比对（BusyBox **没有 `diff`**）：
+
+```bash
+$OC pull /etc/config/openclash.bak-<日期> ./openclash.old
+$OC pull /etc/config/openclash            ./openclash.now
+# 本地（Windows/macOS/Linux 都行）：
+python -c "
+import difflib
+a=open('openclash.old',encoding='utf-8',errors='replace').read().splitlines()
+b=open('openclash.now',encoding='utf-8',errors='replace').read().splitlines()
+print('\n'.join(difflib.unified_diff(a,b,'old','now',lineterm='',n=1)))
+"
+```
+
+**diff 里区分两类行**：
+- 自己刚改的 → 标注出来（否则会误判成"别人改坏的"）
+- 其余全部 → 就是**别人的改动清单**，逐项判断影响
+
+> 没有可比对的旧备份时，退而求其次：
+> ① 查源配置是否来自 git 仓库（注释/图标里的 repo 地址），去仓库取历史版本；
+> ② 查 OpenClash 插件日志 / `logread` 里改动时间点附近的痕迹。
+
+### 第 2 步 · 已知的高危被改项（实测清单）
+
+| 被改项 | 正常值 | 改坏的后果 | 特征现象 |
+|--------|-------|-----------|---------|
+| `filter_aaaa_dns` | `1` | DNS 返回 AAAA，流量走 IPv6 | 旁路由无 IPv6 时**大量超时** |
+| `dnsmasq_filter_aaaa` | `1` | dnsmasq 侧也不过滤 AAAA | 同上，双保险失效 |
+| `core_type` | `Smart` | 内核被换（Smart↔Meta） | 绑定 Smart 的策略组行为异常 |
+| `smart_enable` | `1` | Smart 特性全关 | `smart_*` / `lgbm_*` 系列选项一起失效 |
+| `enable_geoip_dat` | 视部署 | 改变 GeoIP 加载方式 | 规则匹配异常 |
+| 节点缺 `udp: true` | `udp: true` | **hysteria2 / tuic 等 QUIC 系协议握手失败** | **单个节点**超时，同组其他节点正常 |
+
+> **`udp: true` 这一条最容易漏**：hysteria2 是 QUIC（UDP）协议，
+> 少了这一行服务端再好也连不上。判别法：把**同类型节点**放在一起对照，
+> 差异行往往就是元凶。**别急着说"节点挂了" —— 先看配置差了什么。**
+
+### 第 3 步 · 按「问题在哪一层」定界
+
+```
+现象：所有代理都慢/不通
+  ├─ 全部流量都受影响 → 查全局开关（ipv6 / AAAA 过滤 / 内核类型）
+  └─ 只有某个策略组受影响 → 查那个组的选中节点 + 该节点配置（如 udp: true）
+
+现象：日志大量 network is unreachable  → 地址族问题（IPv6 无出口却放行 AAAA）
+现象：日志大量 context deadline exceeded → 等待超时（DNS 卡 / 地址族错误 / 节点不通）
+```
+
+日志差分定位（比读配置快）：
+
+```bash
+$OC run 'BEFORE=$(wc -l < /tmp/openclash.log); curl -s -o /dev/null --max-time 8 https://目标/; tail -n +$BEFORE /tmp/openclash.log'
+```
+
+### 第 4 步 · 清理噪音，别被误导
+
+- 反复出现的**同一个** `dial 直连 ... connection refused`（固定目标 IP:端口）
+  通常是某设备在重试一个已关闭的服务，**刷屏但不是主因** —— 别围着它改。
+- **不要批量测全部节点**：70 个节点并发打 `/delay` 会把 clash 的 API 打爆，
+  返回一片 `503/504`，让你误判成"节点大面积失效"。要测就 **单个测、短超时**。
+
+### 第 5 步 · 修改（严格走 §1 标准流程）
+
+```bash
+# ① 备份（UCI 与源配置都要）
+$OC run "cp -a /etc/config/openclash /etc/config/openclash.bak-<日期>"
+$OC run "cp -a /etc/openclash/config/proxy.yaml /etc/openclash/config/proxy.yaml.bak-<日期>"
+
+# ② ⚠️ 判断改哪里：UCI 会被 yml_change.sh 覆盖源配置！
+#    yml_change.sh 会用 UCI 的 ipv6_enable / ipv6_dns / core_type 覆盖源文件同名项
+#    ⇒ 被 UCI 管理的开关，必须改 UCI（改源文件等于白改）
+#    ⇒ 纯节点/策略组字段（如 udp: true），改源文件
+
+# ③ 改源文件时走两道闸门（deploy-check + clash -t），见 §1 ④
+# ④ restart（改源配置/内核/端口必须 restart，不能用 reload —— 见 §1）
+# ⑤ 二级闸门验证：等就绪 + 查日志 + **真实链路**（核心活着 ≠ 流量能出去）
+```
+
+### 第 6 步 · 汇报要包含「改了什么 + 备份路径 + 回滚命令」
+
+回滚是用户唯一的退路，**必须给**：
+
+```bash
+cp -a /etc/config/openclash.bak-<日期> /etc/config/openclash && /etc/init.d/openclash restart
+```
+
+### 反面教材（真实踩过的坑）
+
+- ❌ 把「Google 打不开」当成根因 → 实际是**全局 AAAA 过滤被关**，所有代理都慢。
+- ❌ 用批量 `/delay` 测 70 个节点 → API 被打爆返回一片 503/504
+  → **误判「节点大面积失效」**，而用户明确说过节点没问题。
+- ❌ 发现某节点 timeout 就想「切到别的节点」→ 那是**绕过**；真因是它缺 `udp: true`。
+- ❌ 只改源文件的 `ipv6: false` → 被 `yml_change.sh` 用 UCI 覆盖回去，白改。
+
