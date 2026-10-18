@@ -480,10 +480,71 @@ print('\n'.join(difflib.unified_diff(a,b,'old','now',lineterm='',n=1)))
 | `smart_enable` | `1` | Smart 特性全关 | `smart_*` / `lgbm_*` 系列选项一起失效 |
 | `enable_geoip_dat` | 视部署 | 改变 GeoIP 加载方式 | 规则匹配异常 |
 | 节点缺 `udp: true` | `udp: true` | **hysteria2 / tuic 等 QUIC 系协议握手失败** | **单个节点**超时，同组其他节点正常 |
+| `enable_redirect_dns` | `1` | DNS 劫持改为「防火墙转发」 | **所有 LAN 设备拿不到 fake-ip** |
+| `lan_ac_mode` | `0` | 访问控制切「白名单模式」 | **所有 LAN 设备流量被放行绕过代理** |
 
 > **`udp: true` 这一条最容易漏**：hysteria2 是 QUIC（UDP）协议，
 > 少了这一行服务端再好也连不上。判别法：把**同类型节点**放在一起对照，
 > 差异行往往就是元凶。**别急着说"节点挂了" —— 先看配置差了什么。**
+
+> ⚠️ **最后两项是一对连体坑**，见下方「DNS 劫持方式与访问控制」专节 ——
+> 用户点一下 UI 弹窗就会同时踩到，且**路由器自身测试仍然正常**，极易误判为"已修好"。
+
+### 第 2.5 步 · DNS 劫持方式与访问控制（连体坑，实测）
+
+**触发场景**：OpenClash 弹窗提示「fake-ip 模式下，DNS 劫持方式切换为防火墙转发」，
+用户点了「是」→ 代理立刻全断。
+
+**为什么断**：这个切换**同时改了两个选项**，而且两者都依赖"名单"，名单默认是空的：
+
+| 选项 | Dnsmasq 转发（正常） | 防火墙转发（点了之后） |
+|------|---------------------|----------------------|
+| `enable_redirect_dns` | `1` | `2` |
+| DNS 劫持范围 | **所有设备** | **仅白名单内的设备** |
+| `lan_ac_mode` | `0`（黑名单，空=全走代理） | **`1`（白名单，空=全被排除）** |
+
+**故障的 nft 证据**（`nft list chain inet fw4 openclash`）：
+
+```nft
+# ❌ 白名单模式下（名单为空）→ 所有设备被放行，根本不进 clash
+ether saddr != @lan_ac_white_macs ip saddr != @lan_ac_white_ips counter packets 756 return
+
+# ✅ 改回黑名单模式后（名单为空）→ 不排除任何设备，全部走代理
+ip saddr @lan_ac_black_ips    counter packets 0 return
+ether saddr @lan_ac_black_macs counter packets 0 return
+```
+
+**致命误判点**：`curl` 在**路由器自身**上测 Google 依然 `HTTP 200` ——
+因为路由器自己走 `nat_output` 链，不受 LAN 访问控制限制。
+**路由器能上网 ≠ 局域网设备能上网。** 必须看设备侧证据：
+
+```bash
+# 关键判据：日志里的源 IP 是否包含 LAN 设备（只有 .168 自己 = 设备没进来）
+$OC run 'tail -300 /tmp/openclash.log | grep -oE "192\.168\.2\.[0-9]+:[0-9]+" | cut -d: -f1 | sort | uniq -c | sort -rn | head'
+# 以及主链 redirect 的命中计数（0 = 没流量进来）
+$OC run 'nft list chain inet fw4 openclash'
+```
+
+**修复（不需要按设备分流时）**：
+
+```sh
+uci set openclash.config.enable_redirect_dns='1'   # DNS 劫持回 Dnsmasq 转发
+uci set openclash.config.lan_ac_mode='0'           # 访问控制回黑名单(空=全走代理)
+uci commit openclash
+/etc/init.d/openclash restart
+```
+
+**若确实要按设备控制谁走代理**（防火墙转发的正当用途），则**必须**先填白名单：
+
+```sh
+# IP 与 MAC 两种都支持；填了之后只有名单内设备被劫持/代理
+/usr/share/openclash/openclash_client_ac.sh white add <设备IP>
+/usr/share/openclash/openclash_client_ac.sh white add "" <设备MAC>
+```
+
+> `lan_ac_mode` 语义有源码依据：`/usr/share/openclash/openclash_debug.sh` 里
+> `[ "$lan_ac_mode" = "1" ] && echo "White" || echo "Black"`。
+> 空名单 + 白名单模式 = 排除所有人；空名单 + 黑名单模式 = 不排除任何人。
 
 ### 第 3 步 · 按「问题在哪一层」定界
 
@@ -541,4 +602,10 @@ cp -a /etc/config/openclash.bak-<日期> /etc/config/openclash && /etc/init.d/op
   → **误判「节点大面积失效」**，而用户明确说过节点没问题。
 - ❌ 发现某节点 timeout 就想「切到别的节点」→ 那是**绕过**；真因是它缺 `udp: true`。
 - ❌ 只改源文件的 `ipv6: false` → 被 `yml_change.sh` 用 UCI 覆盖回去，白改。
+- ❌ **在路由器上 `curl` 通了就宣布修好** → 路由器自己走 `nat_output`，
+  不受 LAN 访问控制限制。**「路由器能上 Google」不等于「用户的设备能上 Google」**——
+  必须查设备侧证据（日志里的 LAN 源 IP + `redirect` 命中计数）。
+- ❌ **只修了弹窗改的第一个选项就收工** → 「切防火墙转发」实际连改两项
+  （`enable_redirect_dns` + `lan_ac_mode`），只修前一半，设备仍然全被排除。
+  **UI 弹窗的副作用往往是复数，改完要逐项核对 UCI 与 nft 规则。**
 
