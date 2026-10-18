@@ -92,29 +92,7 @@ AI：① 找历史备份 → 拉下来 diff → 列出「被改了哪几项」
 | 🧊 **不要批量测节点** | 70 个并发会把 clash API 打爆（一片 503/504），**误判成节点全挂** |
 | 🖥️ **别在路由器上 curl 通了就收工** | 路由器走 `nat_output`，不受 LAN 访问控制限制——**它通 ≠ 用户的设备通** |
 
-> 完整流程与「高危被改项清单」见 [`SKILL.md` §10](SKILL.md)。
-
-### ⚠️ 一个特别隐蔽的坑：点了弹窗就断网
-
-OpenClash 弹窗提示「fake-ip 模式下 DNS 劫持方式切换为防火墙转发」，点「是」之后
-**代理立刻全断**，而路由器自身测试**依然正常**。
-
-原因：这个切换**同时改了两个选项**，两者都依赖「名单」，而名单默认是空的：
-
-| 选项 | 正常 | 点了之后 | 空名单的后果 |
-|:--|:--|:--|:--|
-| `enable_redirect_dns` | `1`（Dnsmasq） | `2`（防火墙转发） | 只劫持白名单设备 |
-| `lan_ac_mode` | `0`（黑名单） | `1`（白名单） | **排除所有设备** |
-
-结果：所有 LAN 设备流量被 `return` 放行、根本不进 clash →
-直连打不开 Google。**「防火墙转发」是给「按设备分流」用的，不是通用开关。**
-
-修复（不需要按设备分流时）：
-```sh
-uci set openclash.config.enable_redirect_dns='1'
-uci set openclash.config.lan_ac_mode='0'
-uci commit openclash && /etc/init.d/openclash restart
-```
+> 完整流程、高危被改项清单、排查命令见 [`SKILL.md` §10](SKILL.md)。
 
 ---
 
