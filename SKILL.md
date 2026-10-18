@@ -419,6 +419,18 @@ python "$SKILL/scripts/oc.py" setup --host <IP> --user root --password '<密码>
 - 修改本仓库文件后：跑 `python tests/check_secrets.py` 再提交；
   **`git push` 需用户单独确认**
 
+### 仓库纪律：README 给人看，SKILL.md 给 agent 看
+
+**两类内容不许混。**
+
+| 内容类型 | 归属 | 例子 |
+|---------|------|------|
+| 定位、能力介绍、用法示例、判断原则 | `README.md` | 「这是什么」「怎么装」「几条原则」 |
+| 配置项对照表、修复命令、nft 证据、判据脚本、排查细节 | `SKILL.md` | UCI 选项表、`uci set ...`、日志分析命令 |
+
+> README 里最多留**一句话说明 + 指向 SKILL.md 的链接**。
+> 技术细节堆进 README 会让人读不下去 —— 已因这个原因瘦身过一次（`96787e0`）。
+
 ---
 
 ## 10 · 接手「被改坏了」的现场（排错流程）
