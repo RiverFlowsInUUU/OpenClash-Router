@@ -15,7 +15,7 @@
 
 </div>
 
-> 🤖 **AI agent 请从这里开始** → [`SKILL.md`](SKILL.md)：标准流程、五条铁律、领域知识引路、iStoreOS 实测坑。
+> 🤖 **AI agent 请从这里开始** → [`SKILL.md`](SKILL.md)：标准流程、五条铁律、领域知识引路、iStoreOS 实测坑、**经验回流（踩过的坑回灌本仓库）**。
 
 ---
 
