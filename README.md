@@ -189,6 +189,7 @@ $OC forget -y                  # 🗑️ 删除配置
 - Python ≥ 3.8（依赖运行时自动安装：`paramiko`、`cryptography`）
 - 路由器：OpenWrt / iStoreOS（dropbear 或 OpenSSH 均可）
 - 首次配置需要一次 SSH 密码；此后永久免密
+- Windows + Git Bash：跑 `oc.py` 前需 `export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1`（原因见 [`SKILL.md` §4](https://github.com/RiverFlowsInUUU/OpenClash-Router/blob/main/SKILL.md)）
 
 ---
 

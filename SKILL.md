@@ -50,6 +50,8 @@ $OC probe           # 状态总览：系统/内存/模式/端口/配置/防火�
 #    拿到现状后，给用户「改什么 / 改成什么 / 怎么回滚」的表格，等确认
 
 # ② 改前检查 + 拉源文件（一定改源文件，不是运行配置 —— 见 §2 铁律 1）
+#    ⚠️ Windows / Git Bash 先执行 §4「客户端侧」那条 export，
+#       否则下面的 /etc/... 会被改写成 C:\...\PortableGit\etc\... → safety 假判负、pull 报文件不存在
 $OC safety --config /etc/openclash/config/proxy.yaml   # 有备份? 目标对? 核心在跑?
 $OC pull /etc/openclash/config/proxy.yaml ./work/proxy.yaml
 
@@ -259,6 +261,36 @@ curl -sL -o /tmp/mihomo-config.yaml \
 ---
 
 ## 4 · 环境坑（iStoreOS 实测，动手前扫一眼）
+
+> 本节第一条是**客户端侧**（跑 oc.py 的那台机器），其余是**设备侧**（路由器）。
+> 客户端侧先排掉，否则会误判成路由器的问题。
+
+### 客户端侧 · Windows / Git Bash 会改写远端绝对路径（最先撞上）
+
+**症状**：`oc.py` 报的路径里冒出 `PortableGit` / `Git\etc`，例如：
+
+```
+FAIL  D1 C:\...\PortableGit\etc\openclash\config\proxy.yaml 没有备份（.bak-*）
+FAIL  D2 目标 C:\...\PortableGit\etc\openclash\config\proxy.yaml 不是当前生效配置
+ERROR: 下载失败：远端文件不存在或不可读 → C:\...\PortableGit\etc\openclash\config\proxy.yaml
+```
+
+**原因**：Git Bash（MSYS2）会把**看起来像 POSIX 绝对路径的参数**自动转成 Windows 路径。
+`/etc/openclash/config/proxy.yaml` 这种**裸路径参数**必然被改；而整条命令被引号包成
+一个字符串时（`$OC run "grep -n xxx /etc/openclash/config/proxy.yaml"`）反而安全
+—— 所以典型表现是「`run` 正常，`pull` / `push` / `safety` 全挂」。
+
+**判据**：错误信息里的路径含 `PortableGit` 或 `Git\etc` → 就是本坑，**不是**路由器问题，
+也**不是** `safety` 的 D1/D2 真的判负。别因为假判负去动路由器。
+
+**修法**：跑 `oc.py` 前关掉转换（当前 shell 会话内有效）：
+
+```bash
+export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1
+```
+
+之后 `safety --config /etc/...`、`pull /etc/... ./work/x.yaml`、`push ./x.yaml /tmp/x.yaml`
+全部正常。PowerShell / cmd 不经过 MSYS，无此问题。
 
 ### `apk` 可能永久卡死
 
